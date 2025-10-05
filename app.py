@@ -260,8 +260,45 @@ ss.setdefault("rec_transcript", {})  # {qid: str}
 ss.setdefault("tts_audio", {})
 ss.setdefault("tts_done", {})
 
+# NEW — timeboxed interview
+ss.setdefault("interview_duration_min", 10)  # default duration (minutes)
+ss.setdefault("interview_start_ts", None)    # epoch seconds
+ss.setdefault("interview_end_ts", None)      # epoch seconds
+
 # app.py (imports)
 from core.name_extractor import extract_candidate_name
+
+
+# === Timeboxing helpers ===
+def _now() -> float:
+    return time.time()
+
+def _time_left_sec() -> int:
+    """Remaining seconds (0 if finished or not started)."""
+    if not ss.get("interview_end_ts"):
+        return 0
+    return max(0, int(ss["interview_end_ts"] - _now()))
+
+def _fmt_mmss(secs: int) -> str:
+    m, s = divmod(max(0, int(secs)), 60)
+    return f"{m:02d}:{s:02d}"
+
+def _ensure_more_questions(agent, round_name: str, batch: int = 5):
+    """
+    If we’re close to running out of questions while time remains, fetch more and append uniques.
+    """
+    extra = []
+    try:
+        if hasattr(agent, "generate_questions"):
+            extra = agent.generate_questions(round_name, batch)
+        else:
+            extra = agent._generate_questions(round_name, batch)  # noqa
+    except Exception:
+        extra = []
+    if extra:
+        seen = set(ss.questions)
+        ss.questions.extend([q for q in extra if q not in seen])
+
 
 
 
@@ -343,6 +380,13 @@ if ss.stage == "select_round":
         options=list(round_options.keys()),
         format_func=lambda key: round_options[key],
     )
+    # NEW — choose interview duration
+    ss.interview_duration_min = st.slider(
+        "Interview duration (minutes)",
+        min_value=5, max_value=60, step=5, value=ss.interview_duration_min,
+        help="The interviewer will keep asking questions until this time is up."
+    )
+
 
     c1, c2 = st.columns(2)
     with c1:
@@ -354,26 +398,40 @@ if ss.stage == "select_round":
                 ss.feedback = None
 
                 agent = ss.interview_agent
-                with st.spinner(f"Generating questions for the {info['name']} round..."):
+                round_name = info["name"]
+
+                with st.spinner(f"Generating questions for the {round_name} round..."):
                     try:
                         if hasattr(agent, "generate_questions"):
-                            ss.questions = agent.generate_questions(info["name"], info["num_questions"])
+                            ss.questions = agent.generate_questions(round_name, info["num_questions"])
                         else:
-                            ss.questions = agent._generate_questions(info["name"], info["num_questions"])  # noqa
+                            ss.questions = agent._generate_questions(round_name, info["num_questions"])  # noqa
                     except Exception as e:
                         st.error(f"Error generating questions: {e}")
                         st.error(traceback.format_exc())
                         ss.questions = []
 
                 if ss.questions:
-                    ss.stage = "interviewing"
-                    st.success(f"Questions ready. Starting the {info['name']} round!")
-                    # Pre-welcome TTS
-                    # When starting a round (right before playing TTS)
-                    fn = ss.get("candidate_first") or "there"
-                    welcome = f"Welcome, {fn}. This is the {info['name']} round. I will ask you {len(ss.questions)} questions. Let's begin."
-                    tts_welcome = speak_text_bytes(welcome)
+                    # NEW — start the timer
+                    ss.interview_start_ts = _now()
+                    ss.interview_end_ts = ss.interview_start_ts + ss.interview_duration_min * 60
 
+                    # NEW — optional: ensure enough questions for the allotted time
+                    # Heuristic ~1.5 minutes per question (tweak to your style)
+                    target_q = max(len(ss.questions), int((ss.interview_duration_min / 1.5) + 1))
+                    if len(ss.questions) < target_q:
+                        _ensure_more_questions(agent, round_name, batch=target_q - len(ss.questions))
+
+                    ss.stage = "interviewing"
+                    st.success(f"Questions ready. Timer started for {ss.interview_duration_min} min.")
+
+                    # Personalized welcome w/ timeboxing
+                    fn = ss.get("candidate_first") or "there"
+                    welcome = (
+                        f"Welcome, {fn}. This is the {round_name} round. "
+                        f"I’ll keep asking questions until time is up ({ss.interview_duration_min} minutes)."
+                    )
+                    tts_welcome = speak_text_bytes(welcome)
                     if tts_welcome:
                         st.audio(io.BytesIO(tts_welcome), format="audio/mp3")
                     else:
@@ -383,6 +441,7 @@ if ss.stage == "select_round":
                     st.error("Failed to generate questions. Please try again.")
             else:
                 st.warning("Please select a round first.")
+
 
     with c2:
             # New: Q&A-only LLM demo (no interview flow, no feedback)
@@ -428,26 +487,47 @@ if ss.stage == "select_round":
                 else:
                     st.info("No Q&A generated. Check OpenAI credentials and try again.")
 
-
-
 # ---------- Stage 3: Interviewing ----------
 if ss.stage == "interviewing":
     round_name = AVAILABLE_ROUNDS[ss.selected_round_key]["name"]
+
+    # If time is over, go straight to feedback
+    if _time_left_sec() <= 0:
+        ss.stage = "feedback"
+        st.rerun()
+
     st.header(f"Interviewing: {round_name}")
 
-    # Guard: no questions / end of interview
+    # Timer UI
+    left = _time_left_sec()
+    total = ss.interview_duration_min * 60
+    st.info(f"⏳ Time remaining: **{_fmt_mmss(left)}**")
+    st.progress(max(0.0, min(1.0, 1 - (left / total))))
+
+    # If we’re about to exhaust questions and still have time, top up
+    if ss.current_question_index >= len(ss.questions) - 1 and left > 0:
+        _ensure_more_questions(ss.interview_agent, round_name, batch=5)
+
+    # Guard: no questions / index beyond list
     if not ss.questions:
         st.error("No questions available. Please start a round again.")
         st.stop()
     if ss.current_question_index >= len(ss.questions):
-        ss.stage = "feedback"
-        st.rerun()
+        # Try to top up once if time remains; else finish
+        if left > 0:
+            _ensure_more_questions(ss.interview_agent, round_name, batch=5)
+            if ss.current_question_index >= len(ss.questions):
+                ss.stage = "feedback"
+                st.rerun()
+        else:
+            ss.stage = "feedback"
+            st.rerun()
 
-    # Current question
+    # --- Current question ---
     question_text = ss.questions[ss.current_question_index]
     st.markdown(f"**Interviewer:** {question_text}")
 
-    # --- TTS per question (generate once and cache) ---
+    # --- TTS per question (cache once) ---
     qid = f"hr-q-{ss.current_question_index}"
     if not ss["tts_done"].get(qid):
         tts_bytes = speak_text_bytes(question_text)  # MP3 bytes
@@ -469,6 +549,7 @@ if ss.stage == "interviewing":
         key=f"mic_{qid}",
         just_once=False,
         use_container_width=True,
+        format="wav",   # ensure WAV bytes from the component
     )
 
     if rec and rec.get("bytes"):
@@ -478,30 +559,42 @@ if ss.stage == "interviewing":
         # Transcribe once per capture
         if qid not in ss.rec_transcript:
             with st.spinner("Transcribing..."):
-                # Prefer direct bytes path; fall back to path-based if you kept it
                 ss.rec_transcript[qid] = transcribe_audio_bytes(rec["bytes"]) or ""
 
         if ss.rec_transcript.get(qid):
             st.markdown("**Transcript:**")
             st.write(ss.rec_transcript[qid])
 
-    # --- Submit ---
-    disabled = not bool(ss.rec_transcript.get(qid))
-    if st.button("✅ Submit", disabled=disabled, key=f"submit_{qid}"):
-        text = ss.rec_transcript.get(qid, "")
-        if not text:
-            st.warning("Please record (and let it auto-transcribe) before submitting.")
-        else:
-            ss.interview_history.append({"question": question_text, "answer": text})
-            # clear per-Q buffers
-            ss.rec_audio.pop(qid, None)
-            ss.rec_transcript.pop(qid, None)
-            ss["tts_done"].pop(qid, None)
-            ss["tts_audio"].pop(qid, None)
-            # advance or finish
-            ss.current_question_index += 1
-            if ss.current_question_index >= len(ss.questions):
-                ss.stage = "feedback"
+    # --- Actions ---
+    cols = st.columns([1, 1, 6])
+    with cols[0]:
+        disabled = not bool(ss.rec_transcript.get(qid))
+        if st.button("✅ Submit", disabled=disabled, key=f"submit_{qid}"):
+            text = ss.rec_transcript.get(qid, "")
+            if not text:
+                st.warning("Please record (and let it auto-transcribe) before submitting.")
+            else:
+                ss.interview_history.append({"question": question_text, "answer": text})
+                # clear per-Q buffers
+                ss.rec_audio.pop(qid, None)
+                ss.rec_transcript.pop(qid, None)
+                ss["tts_done"].pop(qid, None)
+                ss["tts_audio"].pop(qid, None)
+
+                # If time has expired after this answer, end
+                if _time_left_sec() <= 0:
+                    ss.stage = "feedback"
+                    st.rerun()
+
+                # Otherwise advance; top up if near end and still have time
+                ss.current_question_index += 1
+                if ss.current_question_index >= len(ss.questions) - 1 and _time_left_sec() > 0:
+                    _ensure_more_questions(ss.interview_agent, round_name, batch=5)
+                st.rerun()
+
+    with cols[1]:
+        if st.button("⏹️ End now"):
+            ss.stage = "feedback"
             st.rerun()
 
 
@@ -601,10 +694,13 @@ if ss.stage == "feedback":
             ss.interview_history = []
             ss.feedback = None
             ss.suggested_answers = None
-            # clear any TTS cache
             ss.tts_audio = {}
             ss.tts_done = {}
+            # NEW — reset timer
+            ss.interview_start_ts = None
+            ss.interview_end_ts = None
             st.rerun()
+
     with c2:
         if st.button("Upload New Resume"):
             _cleanup_file(ss.get("temp_resume_path"))
