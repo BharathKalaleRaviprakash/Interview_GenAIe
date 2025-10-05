@@ -11,7 +11,7 @@ from utils.config import OPENAI_API_KEY  # <- use root config.py
 
 # --- LangChain LLM factory ---
 def get_llm(
-    model: str = "gpt-4o-mini",
+    model: str = "gpt-4.1-nano",
     temperature: float = 0.7,
     max_tokens: Optional[int] = None,
 ) -> ChatOpenAI:

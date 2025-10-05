@@ -12,9 +12,9 @@ from agent.round_manger import AVAILABLE_ROUNDS   # <-- fix: was round_manger
 from agent.interview_agent import InterviewAgent
 from utils.config import TEMP_AUDIO_FILENAME
 
-
-# --- Audio I/O ---
-from core.audio_io import speak_text, record_audio, transcribe_audio
+# --- Audio I/O (TTS + STT) ---
+from core.audio_io import speak_text, transcribe_audio
+# (we won't use record_audio anymore because we implement async start/stop here)
 
 # --- Feedback ---
 from core.feedback_generator import generate_feedback_and_scores
@@ -22,15 +22,15 @@ from core.feedback_generator import generate_feedback_and_scores
 # --- Config ---
 from utils import config
 
-
 # Prefer the single constant your audio layer actually uses
 TEMP_AUDIO_FILE = TEMP_AUDIO_FILENAME
 
-# core/audio_io.py  (add near your other imports)
+# ================== Local async audio recorder (Windows-safe) ==================
+# You initially had this inside the same file; keeping it here for convenience.
 import queue
 import wave
 import threading
-import time
+import time as _time
 import sounddevice as sd
 
 # Globals for async recording
@@ -52,6 +52,9 @@ def start_recording(filename: str, samplerate: int = 16000, channels: int = 1) -
         if _record_running:
             raise RuntimeError("A recording is already in progress. Stop it first.")
 
+        # Ensure target folder exists
+        Path(filename).parent.mkdir(parents=True, exist_ok=True)
+
         _record_q = queue.Queue()
         _record_wf = wave.open(filename, "wb")
         _record_wf.setnchannels(channels)
@@ -60,7 +63,7 @@ def start_recording(filename: str, samplerate: int = 16000, channels: int = 1) -
 
         def _callback(indata, frames, time_info, status):
             if status:
-                # You can log/print status if needed
+                # Could log: print(f"[InputStream status] {status}")
                 pass
             _record_q.put(indata.copy())
 
@@ -86,9 +89,10 @@ def start_recording(filename: str, samplerate: int = 16000, channels: int = 1) -
         _record_thread.start()
 
         return filename
+
 def stop_recording() -> str | None:
     """
-    Stops the active recording if any, and closes the WAV file.
+    Stop active recording and close WAV cleanly (Windows-safe).
     Returns path to the recorded file or None if nothing was recorded.
     """
     global _record_q, _record_stream, _record_thread, _record_wf, _record_running
@@ -98,7 +102,7 @@ def stop_recording() -> str | None:
             return None
         _record_running = False
 
-    # Ensure stream and writer thread finish
+    # Stop and close audio stream
     try:
         if _record_stream:
             _record_stream.stop()
@@ -108,6 +112,7 @@ def stop_recording() -> str | None:
     finally:
         _record_stream = None
 
+    # Wait for writer thread to flush
     if _record_thread:
         _record_thread.join(timeout=2.0)
         _record_thread = None
@@ -115,7 +120,7 @@ def stop_recording() -> str | None:
     path = None
     if _record_wf:
         try:
-            path = _record_wf._file.name if hasattr(_record_wf, "_file") else None
+            path = getattr(_record_wf._file, "name", None)
         except Exception:
             path = None
         try:
@@ -126,13 +131,41 @@ def stop_recording() -> str | None:
 
     _record_q = None
 
-    # 🔹 Important: small delay for Windows to release handle
-    time.sleep(0.2)
-
+    # Give Windows a moment to fully release the file handle
+    _time.sleep(0.25)
     return path
 
+# ---------------------- Windows-safe file deletion helpers ---------------------
+def safe_delete(path: str, retries: int = 5, delay: float = 0.3):
+    """
+    Try to delete a file, retrying if Windows keeps it locked (WinError 32).
+    """
+    if not path:
+        return
+    for i in range(retries):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+            return
+        except PermissionError as e:
+            # WinError 32: The process cannot access the file because it is being used by another process
+            if i < retries - 1:
+                _time.sleep(delay)
+                continue
+            else:
+                st.warning(f"Could not remove temporary file {path}: {e}")
+                return
+        except Exception as e:
+            st.warning(f"Could not remove temporary file {path}: {e}")
+            return
 
-# ---------- Page ----------
+def cleanup_temp_file(file_path, retries=5, delay=0.3):
+    """
+    Backwards-compatible wrapper using safe_delete with retries.
+    """
+    safe_delete(file_path, retries=retries, delay=delay)
+
+# ============================== Streamlit UI ==================================
 st.set_page_config(page_title="AceBot Interviewer", layout="wide")
 st.title("AceBot Interviewer")
 st.markdown("Upload your resume, choose **an** interview round, and practice with an AI interviewer!")
@@ -187,13 +220,6 @@ def save_uploaded_file(uploaded_file) -> str | None:
         st.error(f"Error saving uploaded file: {e}")
         return None
 
-def cleanup_temp_file(file_path):
-    try:
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
-    except Exception as e:
-        st.warning(f"Could not remove temporary file {file_path}: {e}")
-
 # ---------- Session ----------
 ss = st.session_state
 ss.setdefault("stage", "upload")
@@ -205,12 +231,11 @@ ss.setdefault("current_question_index", 0)
 ss.setdefault("interview_history", [])
 ss.setdefault("feedback", None)
 ss.setdefault("temp_resume_path", None)
+# recording state
 ss.setdefault("is_recording", False)
-ss.setdefault("recording_path", None)   # current question's wav file (while recording)
-
+ss.setdefault("recording_path", None)
 
 # ---------- Keys / Feature flags ----------
-# Allow the app to run without ElevenLabs (we’ll print text instead of speaking)
 missing = []
 if not getattr(config, "OPENAI_API_KEY", None):
     missing.append("OpenAI")
@@ -238,7 +263,7 @@ if ss.stage == "upload":
                 try:
                     ss.interview_agent = InterviewAgent(ss.resume_text)
                     ss.stage = "select_round"
-                    st.rerun()  # move to next stage immediately
+                    st.rerun()
                 except Exception as e:
                     st.error(f"Failed to initialize interview agent: {e}")
                     ss.resume_text = None
@@ -278,7 +303,6 @@ if ss.stage == "select_round":
             agent = ss.interview_agent
             with st.spinner(f"Generating questions for the {info['name']} round..."):
                 try:
-                    # Prefer a public method; fall back if needed.
                     if hasattr(agent, "generate_questions"):
                         ss.questions = agent.generate_questions(info["name"], info["num_questions"])
                     else:
@@ -304,7 +328,6 @@ if ss.stage == "select_round":
             st.warning("Please select a round first.")
 
 # ---------- Stage 3: Interviewing ----------
-# ---------- Stage 3: Interviewing ----------
 if ss.stage == "interviewing":
     round_name = AVAILABLE_ROUNDS[ss.selected_round_key]["name"]
     st.header(f"Interviewing: {round_name}")
@@ -312,6 +335,14 @@ if ss.stage == "interviewing":
     if not ss.questions:
         st.error("No questions loaded for this round. Please go back and select again.")
         if st.button("Go Back"):
+            # best-effort stop if recording
+            if ss.get("is_recording", False):
+                try:
+                    stop_recording()
+                except Exception:
+                    pass
+                ss.is_recording = False
+                ss.recording_path = None
             ss.stage = "select_round"
             st.rerun()
         st.stop()
@@ -333,17 +364,19 @@ if ss.stage == "interviewing":
 
         st.markdown("**Record your answer:**")
 
-        # Build a unique temp filename per question to avoid collisions
-        # (Keep your TEMPAUDIOFILE base but add the question index)
-        q_audio_path = str(Path(TEMP_AUDIO_FILE).with_name(
-            f"{Path(TEMP_AUDIO_FILE).stem}_q{q_idx}{Path(TEMP_AUDIO_FILE).suffix or '.wav'}"
-        ))
+        # Unique temp filename per question; force .wav for consistency
+        q_audio_path = str(
+            Path(TEMP_AUDIO_FILE).with_suffix("").with_name(
+                f"{Path(TEMP_AUDIO_FILE).stem}_q{q_idx}.wav"
+            )
+        )
 
         c1, c2, c3 = st.columns(3)
 
         # START
         with c1:
-            start_disabled = ss.get("is_recording", False)
+            has_prior_take = bool(ss.get(f"audio_path_q{q_idx}") or ss.get(f"transcript_q{q_idx}"))
+            start_disabled = ss.get("is_recording", False) or has_prior_take
             if st.button("▶️ Start Recording", disabled=start_disabled, key=f"start_q{q_idx}"):
                 try:
                     # If somehow a prev recording was hanging, stop it
@@ -352,6 +385,8 @@ if ss.stage == "interviewing":
                             stop_recording()
                         except Exception:
                             pass
+                        ss.is_recording = False
+                        ss.recording_path = None
 
                     start_recording(q_audio_path, samplerate=16000, channels=1)
                     ss.is_recording = True
@@ -383,6 +418,9 @@ if ss.stage == "interviewing":
 
                 ss.recording_path = None
 
+                # Small delay before any operation on the file (Windows handle release)
+                time.sleep(0.25)
+
                 # Auto-transcribe on stop if we have a file
                 if ss.get(f"audio_path_q{q_idx}"):
                     with st.spinner("Transcribing..."):
@@ -405,8 +443,8 @@ if ss.stage == "interviewing":
                 answer_text = ss.get(f"transcript_q{q_idx}", "") or "[No response recorded]"
                 ss.interview_history.append({"question": question, "answer": answer_text})
 
-                # Clean last temp audio eagerly
-                cleanup_temp_file(ss.get(f"audio_path_q{q_idx}"))
+                # Clean last temp audio eagerly (Windows-safe)
+                safe_delete(ss.get(f"audio_path_q{q_idx}"))
                 for k in (f"audio_path_q{q_idx}", f"transcript_q{q_idx}"):
                     if k in ss:
                         del ss[k]
@@ -422,6 +460,8 @@ if ss.stage == "interviewing":
         # Show current state / controls below
         if ss.get("is_recording", False):
             st.info("🎙️ Recording... Click **Stop Recording** when you're done.")
+        elif has_prior_take:
+            st.info("A recording exists for this question. You can **Submit Answer** or **Re-record**.")
 
         # Playback + transcript (if any)
         if ss.get(f"audio_path_q{q_idx}"):
@@ -444,8 +484,8 @@ if ss.stage == "interviewing":
                         pass
                     ss.is_recording = False
 
-                # Remove any existing audio/transcript for this question
-                cleanup_temp_file(ss.get(f"audio_path_q{q_idx}"))
+                # Remove any existing audio/transcript for this question (Windows-safe)
+                safe_delete(ss.get(f"audio_path_q{q_idx}"))
                 for k in (f"audio_path_q{q_idx}", f"transcript_q{q_idx}"):
                     if k in ss:
                         del ss[k]
@@ -453,12 +493,15 @@ if ss.stage == "interviewing":
                 st.rerun()
 
     else:
-        # best effort stop if recording
+        # best-effort stop if recording (avoid dangling handles)
         if ss.get("is_recording", False):
-            try: stop_recording()
-            except Exception: pass
+            try:
+                stop_recording()
+            except Exception:
+                pass
             ss.is_recording = False
             ss.recording_path = None
+
         st.success("All questions for this round are completed.")
         ss.stage = "feedback"
         try:
@@ -532,11 +575,20 @@ if ss.stage == "feedback":
         ss.interview_history = []
         ss.feedback = None
         # Clear spoken flags
-        for k in [k for k in ss.keys() if k.startswith("spoken_q")]:
+        for k in [k for k in ss.keys() if isinstance(k, str) and k.startswith("spoken_q")]:
             del ss[k]
         st.rerun()
 
     if st.button("Upload New Resume"):
+        # Best-effort stop if recording
+        if ss.get("is_recording", False):
+            try:
+                stop_recording()
+            except Exception:
+                pass
+            ss.is_recording = False
+            ss.recording_path = None
+
         # Full reset (also cleans prior resume file)
         cleanup_temp_file(ss.get("temp_resume_path"))
         for key in list(ss.keys()):
