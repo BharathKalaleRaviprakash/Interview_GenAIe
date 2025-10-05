@@ -260,6 +260,20 @@ ss.setdefault("rec_transcript", {})  # {qid: str}
 ss.setdefault("tts_audio", {})
 ss.setdefault("tts_done", {})
 
+# app.py (imports)
+from core.name_extractor import extract_candidate_name
+
+# ... after successful parse & validation ...
+full_name, first_name = extract_candidate_name(ss.resume_text)
+ss.candidate_name = full_name or ss.get("candidate_name") or ""
+ss.candidate_first = first_name or (ss.candidate_name.split()[0] if ss.candidate_name else "")
+
+st.success("Resume parsed and validated successfully! ✅")
+ss.candidate_name = st.text_input("Confirm your name", value=ss.candidate_name).strip()
+if ss.candidate_name:
+    ss.candidate_first = ss.candidate_name.split()[0].title()
+
+
 
 # ---------- Stage 1: Upload ----------
 if ss.stage == "upload":
@@ -358,8 +372,11 @@ if ss.stage == "select_round":
                     ss.stage = "interviewing"
                     st.success(f"Questions ready. Starting the {info['name']} round!")
                     # Pre-welcome TTS
-                    welcome = f"Welcome to the {info['name']} round. I will ask you {len(ss.questions)} questions. Let's begin."
+                    # When starting a round (right before playing TTS)
+                    fn = ss.get("candidate_first") or "there"
+                    welcome = f"Welcome, {fn}. This is the {info['name']} round. I will ask you {len(ss.questions)} questions. Let's begin."
                     tts_welcome = speak_text_bytes(welcome)
+
                     if tts_welcome:
                         st.audio(io.BytesIO(tts_welcome), format="audio/mp3")
                     else:

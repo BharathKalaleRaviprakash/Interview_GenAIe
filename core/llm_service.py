@@ -7,7 +7,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
 from utils.config import OPENAI_API_KEY
 
-# --- LangChain LLM factory ---
+# ---------- LangChain factory ----------
 def get_llm(
     model: str = "gpt-4o-mini",
     temperature: float = 0.7,
@@ -15,20 +15,15 @@ def get_llm(
 ) -> ChatOpenAI:
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not set. Check your secrets/env.")
-    return ChatOpenAI(
-        model=model,
-        temperature=temperature,
-        api_key=OPENAI_API_KEY,
-        max_tokens=max_tokens,
-    )
+    return ChatOpenAI(model=model, temperature=temperature, api_key=OPENAI_API_KEY, max_tokens=max_tokens)
 
 def _lc_msg(msg: dict) -> BaseMessage:
     role = msg.get("role", "user")
     content = msg.get("content", "")
     return SystemMessage(content=content) if role == "system" else HumanMessage(content=content)
 
+# ---------- OpenAI SDK client (for JSON mode) ----------
 def _get_openai_client():
-    # Fallback to env/secrets in case utils.config isn't present at import-time
     key = OPENAI_API_KEY or os.getenv("OPENAI_API_KEY")
     if not key:
         try:
@@ -38,7 +33,10 @@ def _get_openai_client():
             key = None
     if not key:
         raise RuntimeError("OPENAI_API_KEY not found.")
-    from openai import OpenAI  # openai>=1.40.0
+    try:
+        from openai import OpenAI  # openai>=1.x
+    except Exception as e:
+        raise RuntimeError(f"OpenAI SDK import failed: {e}")
     return OpenAI(api_key=key)
 
 def generate_completion(
@@ -48,34 +46,47 @@ def generate_completion(
     max_tokens: int = 800,
     temperature: float = 0.7,
     system_prompt: str = "You are a helpful AI assistant.",
-    # accepted aliases/extra args:
-    system: Optional[str] = None,
+    # aliases / extras accepted by callers:
+    system: Optional[str] = None,                      # alias
     stream: bool = False,
     extra_messages: Optional[Iterable[dict]] = None,
-    response_format: Optional[dict] = None,   # when provided, use Responses API
+    response_format: Optional[dict] = None,            # when set, use Chat Completions JSON mode
 ) -> str | Generator[str, None, None]:
     """
-    If response_format is provided (e.g., {"type": "json_object"}), uses OpenAI Responses API
-    to return JSON-only output. Otherwise uses LangChain ChatOpenAI.
+    - If `response_format` is provided (e.g. {"type":"json_object"}), route to Chat Completions with JSON mode.
+    - Otherwise use LangChain's ChatOpenAI as before.
     """
     sys_txt = (system or system_prompt or "").strip()
 
-    # --- JSON mode via Responses API ---
+    # ===== JSON mode path (Chat Completions) =====
     if response_format and not stream:
         client = _get_openai_client()
-        # Build a minimal "input" that includes the system hint
-        sys_block = f"System: {sys_txt}\n\n" if sys_txt else ""
-        text_input = sys_block + f"User: {prompt}"
-        resp = client.responses.create(
-            model=model,
-            input=text_input,
-            temperature=temperature,
-            max_output_tokens=max_tokens,
-            response_format=response_format,   # {"type":"json_object"}
-        )
-        return (resp.output_text or "").strip()
+        messages = []
+        if sys_txt:
+            messages.append({"role": "system", "content": sys_txt})
+        if extra_messages:
+            messages.extend(list(extra_messages))
+        messages.append({"role": "user", "content": prompt})
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format=response_format,    # JSON mode here
+            )
+            return (resp.choices[0].message.content or "").strip()
+        except TypeError:
+            # Older SDK without response_format support: try without it
+            resp = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            return (resp.choices[0].message.content or "").strip()
 
-    # --- LangChain (default path) ---
+    # ===== Default LangChain path =====
     try:
         llm = get_llm(model=model, temperature=temperature, max_tokens=max_tokens)
         msgs: list[BaseMessage] = []
@@ -105,6 +116,7 @@ def generate_completion(
             return text or "Error: No content in response."
         except Exception:
             return str(content) if content else "Error: No content in response."
+
     except Exception as e:
         logging.exception("Error during LLM call")
         msg = str(e)
