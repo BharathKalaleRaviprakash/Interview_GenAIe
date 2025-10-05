@@ -85,14 +85,16 @@ Return ONLY valid JSON matching this schema (no markdown fences, no extra text):
 """
 
     # ---- First attempt ----
+        # ---- First attempt (JSON mode on) ----
     raw = generate_completion(
         prompt=user_prompt,
         system=SYSTEM_PROMPT,
         model=model or "gpt-4o-mini",
         temperature=temperature,
-        # The LangChain-backed llm_service ignores response_format; that's okay.
         stream=False,
+        response_format={"type": "json_object"},   # <<— force JSON-only output
     )
+
     if not isinstance(raw, str):
         raw = "".join(list(raw))
 
@@ -128,7 +130,9 @@ CONTENT TO FIX:
         model=model or "gpt-4o-mini",
         temperature=0.0,
         stream=False,
+        response_format={"type": "json_object"},   # <<— force JSON
     )
+
     if not isinstance(repaired, str):
         repaired = "".join(list(repaired))
 
