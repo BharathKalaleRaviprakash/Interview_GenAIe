@@ -165,10 +165,99 @@ def cleanup_temp_file(file_path, retries=5, delay=0.3):
     Backwards-compatible wrapper using safe_delete with retries.
     """
     safe_delete(file_path, retries=retries, delay=delay)
+# ===== Suggested answers (improved/ideal responses) =====
+def _suggest_answers_offline(resume_text: str, round_name: str, questions: list[str], user_answers: list[str]) -> list[str]:
+    """No-API fallback: STAR-style suggested answers with light coaching."""
+    resume_hint = (resume_text or "").split("\n")[0][:120]
+    out = []
+    for i, q in enumerate(questions):
+        ua = (user_answers[i] if i < len(user_answers) else "").strip()
+        critique = ""
+        if ua:
+            critique = (
+                " Your original answer could be improved by being more specific on metrics, "
+                "explicit trade-offs, and closing with the measurable result."
+            )
+        sug = (
+            f"**Situation:** Worked on {resume_hint or 'a recent project'} where {q[:120]}.\n"
+            f"**Task:** Clearly defined the problem, success metrics, and constraints (latency, cost, quality).\n"
+            f"**Action:** Evaluated options, explained trade-offs, and chose an approach. "
+            f"Implemented iteratively, validated with experiments, and monitored with dashboards.\n"
+            f"**Result:** Achieved a quantifiable impact (e.g., +28% accuracy, -35% latency). "
+            f"Reflected on risks, next steps, and how to generalize.{critique}"
+        )
+        out.append(sug)
+    return out
+
+def _suggest_answers_llm(resume_text: str, round_name: str, questions: list[str], user_answers: list[str]) -> list[str]:
+    """OpenAI-powered suggested answers. Falls back to offline if not available."""
+    try:
+        import os, json
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("no OPENAI_API_KEY")
+
+        # Prefer new OpenAI Responses API
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key)
+            qa_block = "\n".join(
+                [f"{i+1}) Q: {q}\n   A: {(user_answers[i] if i < len(user_answers) else '').strip()}"
+                 for i, q in enumerate(questions)]
+            )
+            prompt = (
+                "You are an interview coach. For each question, produce a concise, high-quality suggested answer "
+                "that follows STAR and includes specific metrics/trade-offs when relevant. "
+                "Return JSON: {\"suggested\": [\"...\", \"...\"]} with the same length as the number of questions.\n\n"
+                f"ROUND: {round_name}\n\nRESUME EXCERPT:\n{(resume_text or '')[:2000]}\n\n"
+                f"Q&A (user answers may be empty):\n{qa_block}"
+            )
+            resp = client.responses.create(
+                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                input=prompt,
+                temperature=0.25,
+                max_output_tokens=1800,
+                response_format={"type": "json_object"},
+            )
+            raw = (resp.output_text or "").strip()
+        except Exception:
+            # Legacy
+            import openai as legacy_openai
+            legacy_openai.api_key = api_key
+            qa_block = "\n".join(
+                [f"{i+1}) Q: {q}\n   A: {(user_answers[i] if i < len(user_answers) else '').strip()}"
+                 for i, q in enumerate(questions)]
+            )
+            msgs = [
+                {"role": "system", "content": "Return valid JSON only."},
+                {"role": "user", "content":
+                    "You are an interview coach. For each question, produce a concise, high-quality suggested answer "
+                    "that follows STAR and includes specific metrics/trade-offs when relevant. "
+                    "Return JSON: {\"suggested\": [\"...\", \"...\"]} with the same length as the number of questions.\n\n"
+                    f"ROUND: {round_name}\n\nRESUME EXCERPT:\n{(resume_text or '')[:2000]}\n\n"
+                    f"Q&A (user answers may be empty):\n{qa_block}"
+                },
+            ]
+            raw = legacy_openai.ChatCompletion.create(
+                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                messages=msgs,
+                temperature=0.25,
+                max_tokens=1800,
+            )["choices"][0]["message"]["content"]
+
+        data = json.loads(raw)
+        suggested = data.get("suggested", [])
+        if not isinstance(suggested, list) or not suggested:
+            raise ValueError("LLM returned empty/invalid suggestions")
+
+        # match length
+        return (suggested + [""] * len(questions))[:len(questions)]
+    except Exception:
+        return _suggest_answers_offline(resume_text, round_name, questions, user_answers)
 
 # ============================== Streamlit UI ==================================
-st.set_page_config(page_title="AceBot Interviewer", layout="wide")
-st.title("AceBot Interviewer")
+st.set_page_config(page_title="Interview GenAIe", layout="wide")
+st.title("Interview GenAIe")
 st.markdown("Upload your resume, choose **an** interview round, and practice with an AI interviewer!")
 
 st.sidebar.header("About")
@@ -176,6 +265,62 @@ st.sidebar.info(
     "This app uses AI (OpenAI & ElevenLabs) to conduct a mock interview based on your resume. "
     "Upload your resume, select a round, answer questions by voice, and receive feedback/scores."
 )
+
+
+# ===== Demo helpers (no mic needed) =====
+def _demo_generate_answers_offline(resume_text: str, questions: list[str]) -> list[str]:
+    """
+    No-API, deterministic STAR-ish answers so you can test UI quickly.
+    Uses resume_text lightly to personalize.
+    """
+    who = "I"  # keep it neutral
+    resume_hint = (resume_text or "").split("\n")[0][:120]
+    answers = []
+    for i, q in enumerate(questions, start=1):
+        ans = (
+            f"**Situation:** {who} worked on a project related to {resume_hint or 'my recent role'}.\n"
+            f"**Task:** The goal was to address the problem implied by the question: '{q[:120]}'.\n"
+            f"**Action:** {who} scoped requirements, evaluated trade-offs, and implemented a clear solution with measurable checkpoints.\n"
+            f"**Result:** Reduced errors by ~25% and improved speed by ~30%. Key learning: communicate assumptions early and quantify impact."
+        )
+        answers.append(ans)
+    return answers
+
+def _demo_generate_answers_llm(resume_text: str, questions: list[str]) -> list[str]:
+    """
+    Optional OpenAI-powered answers. If OPENAI isn't set, falls back offline.
+    """
+    try:
+        import os
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("no OPENAI_API_KEY")
+
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+        prompt = (
+            "You are simulating a candidate in a mock interview.\n"
+            "Write concise, STAR-structured answers (120-180 words each), "
+            "using the resume excerpt provided. Return JSON: {\"answers\": [\"...\", \"...\"]}\n\n"
+            f"RESUME EXCERPT:\n{(resume_text or '')[:2000]}\n\n"
+            f"QUESTIONS:\n" + "\n".join([f'{i+1}. {q}' for i, q in enumerate(questions)])
+        )
+        resp = client.responses.create(
+            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            input=prompt,
+            temperature=0.3,
+            max_output_tokens=1200,
+            response_format={"type": "json_object"},
+        )
+        raw = (resp.output_text or "").strip()
+        import json
+        data = json.loads(raw)
+        answers = data.get("answers", [])
+        if not isinstance(answers, list) or not answers:
+            raise ValueError("LLM returned empty/invalid answers")
+        return answers[:len(questions)]
+    except Exception:
+        return _demo_generate_answers_offline(resume_text, questions)
 
 # ---------- Helpers ----------
 def cleanup_all_recordings():
@@ -231,7 +376,7 @@ ss.setdefault("stage", "upload")
 ss.setdefault("resume_text", None)
 ss.setdefault("interview_agent", None)
 ss.setdefault("selected_round_key", None)
-ss.setdefault("questions", None)
+ss.setdefault("questions", 1)
 ss.setdefault("current_question_index", 0)
 ss.setdefault("interview_history", [])
 ss.setdefault("feedback", None)
@@ -334,6 +479,56 @@ if ss.stage == "select_round":
                 st.error("Failed to generate questions. Please try again.")
         else:
             st.warning("Please select a round first.")
+        st.markdown("— or —")
+
+    if st.button("🧪 Run Demo (auto-generate Q&A + feedback)", key="run_demo"):
+        info = AVAILABLE_ROUNDS.get(ss.selected_round_key) if ss.selected_round_key else None
+        if not info:
+            st.warning("Please select a round first.")
+        else:
+            # 1) Generate questions via your existing agent
+            try:
+                if hasattr(ss.interview_agent, "generate_questions"):
+                    demo_questions = ss.interview_agent.generate_questions(info["name"], info["num_questions"])
+                else:
+                    demo_questions = ss.interview_agent._generate_questions(info["name"], info["num_questions"])  # noqa
+            except Exception as e:
+                st.error(f"Error generating questions: {e}")
+                demo_questions = []
+
+            # 2) Use resume (or a tiny built-in fallback) to generate demo answers
+            demo_resume = ss.resume_text or (
+                "Software/Data professional with experience in ML pipelines, GNN/LSTM models, and "
+                "analytics dashboards. Led projects improving accuracy and speed, collaborating with cross-functional teams."
+            )
+
+            # Prefer LLM answers if OPENAI is set; otherwise offline STAR-ish stubs
+            use_llm = bool(os.getenv("OPENAI_API_KEY"))
+            demo_answers = _demo_generate_answers_llm(demo_resume, demo_questions) if use_llm else _demo_generate_answers_offline(demo_resume, demo_questions)
+
+            # 3) Build Q/A pairs and jump straight to feedback
+            ss.questions = demo_questions
+            ss.interview_history = [
+                {"question": q, "answer": (demo_answers[i] if i < len(demo_answers) else "")}
+                for i, q in enumerate(demo_questions)
+            ]
+            ss.current_question_index = len(ss.questions)  # skip interviewing screen
+            ss.stage = "feedback"
+
+            # 4) Generate feedback immediately
+            round_name = info["name"]
+            with st.spinner("Generating demo feedback..."):
+                try:
+                    ss.feedback = generate_feedback_and_scores(
+                        resume_text=demo_resume,
+                        round_name=round_name,
+                        qa_pairs=ss.interview_history,
+                    )
+                except Exception as e:
+                    st.error(f"Failed to generate feedback: {e}")
+                    st.error(traceback.format_exc())
+            st.rerun()
+
 
 # ---------- Stage 3: Interviewing ----------
 # ---------- Stage 3: Interviewing ----------
@@ -414,6 +609,7 @@ if ss.stage == "interviewing":
                     else:
                         st.warning("No transcription captured (silence/network/API).")
                 finally:
+
                     ss.recording_path = None
             else:
                 st.warning("No audio file found after stop.")
@@ -466,7 +662,6 @@ if ss.stage == "interviewing":
         st.markdown("**Transcript:**")
         st.write(ss.rec_transcript[qid])
 
-
 # ---------- Stage 4: Feedback ----------
 if ss.stage == "feedback":
     st.header("Interview Complete — Feedback")
@@ -477,7 +672,7 @@ if ss.stage == "feedback":
         with st.spinner("Generating feedback..."):
             try:
                 ss.feedback = generate_feedback_and_scores(
-                    resume_text=ss.resume_text,
+                    resume_text=ss.resume_text or "",
                     round_name=round_name,
                     qa_pairs=ss.interview_history,
                 )
@@ -485,59 +680,88 @@ if ss.stage == "feedback":
                 st.error(f"Failed to generate feedback: {e}")
                 st.error(traceback.format_exc())
 
-    if ss.feedback:
-        data = ss.feedback
-        st.subheader("Overall Feedback")
-        st.markdown(data.get("overall_feedback", "N/A"))
-
-        st.subheader("Suggestions for Improvement")
-        suggestions = data.get("suggestions", "N/A")
-        if isinstance(suggestions, list):
-            for s in suggestions:
-                st.markdown(f"- {s}")
-        else:
-            st.markdown(suggestions)
-
-        st.subheader("Scores per Question")
-        scores = data.get("scores_per_question", [])
-        total_score = int(data.get("total_score", 0))
-        max_score = len(ss.interview_history) * 10
-
-        if scores and len(scores) == len(ss.interview_history):
-            for i, sc in enumerate(scores):
-                st.markdown(f"- **Q{i+1}:** {int(sc)}/10")
-        elif scores:
-            st.warning(
-                f"Note: Number of scores ({len(scores)}) doesn't match number of questions "
-                f"({len(ss.interview_history)}). Displaying raw scores: {scores}"
+    # ---- Suggested answers (generate once and cache in session) ----
+    if "suggested_answers" not in ss and ss.interview_history:
+        questions = [qa["question"] for qa in ss.interview_history]
+        user_answers = [qa.get("answer", "") for qa in ss.interview_history]
+        with st.spinner("Preparing suggested answers..."):
+            ss.suggested_answers = _suggest_answers_llm(
+                ss.resume_text or "", round_name, questions, user_answers
             )
+
+    # ===== Tabs: Feedback | Suggested Answers =====
+    tab_feedback, tab_suggested = st.tabs(["Feedback", "Suggested answers"])
+
+    with tab_feedback:
+        if ss.feedback:
+            data = ss.feedback
+            st.subheader("Overall Feedback")
+            st.markdown(data.get("overall_feedback", "N/A"))
+
+            st.subheader("Suggestions for Improvement")
+            suggestions = data.get("suggestions", "N/A")
+            if isinstance(suggestions, list):
+                for s in suggestions:
+                    st.markdown(f"- {s}")
+            else:
+                st.markdown(suggestions)
+
+            st.subheader("Scores per Question")
+            scores = data.get("scores_per_question", [])
+            total_score = int(data.get("total_score", 0))
+            max_score = len(ss.interview_history) * 10
+
+            if scores and len(scores) == len(ss.interview_history):
+                for i, sc in enumerate(scores):
+                    st.markdown(f"- **Q{i+1}:** {int(sc)}/10")
+            elif scores:
+                st.warning(
+                    f"Note: Number of scores ({len(scores)}) doesn't match number of questions "
+                    f"({len(ss.interview_history)}). Displaying raw scores: {scores}"
+                )
+            else:
+                st.markdown("Scores could not be determined.")
+
+            st.subheader("Total Score for Round")
+            st.markdown(f"**{total_score} / {max_score or 1}**")
+
+            with st.expander("Show Raw Feedback Data (debug)"):
+                st.json(data)
         else:
-            st.markdown("Scores could not be determined.")
+            st.warning("Feedback is not available for this round.")
 
-        st.subheader("Total Score for Round")
-        st.markdown(f"**{total_score} / {max_score or 1}**")
-
-        with st.expander("Show Raw Feedback Data (debug)"):
-            st.json(data)
-    else:
-        st.warning("Feedback is not available for this round.")
+    with tab_suggested:
+        st.subheader("Suggested answers to your questions")
+        if ss.interview_history and ss.get("suggested_answers"):
+            for i, qa in enumerate(ss.interview_history):
+                q = qa["question"]
+                user_a = qa.get("answer", "")
+                sug_a = ss.suggested_answers[i] if i < len(ss.suggested_answers) else ""
+                with st.expander(f"Q{i+1}. {q}"):
+                    if user_a:
+                        st.markdown("**Your answer:**")
+                        st.markdown(user_a)
+                    st.markdown("**Suggested answer:**")
+                    st.markdown(sug_a)
+                    # copy-friendly text box
+                    st.text_area("Copy/edit:", value=sug_a, height=200, key=f"copy_sug_{i}")
+        else:
+            st.info("Suggested answers will appear here once questions and feedback are available.")
 
     st.markdown("---")
     if st.button("Start Another Round"):
-        # Reset state for a new round, keeping resume and agent
         ss.stage = "select_round"
         ss.selected_round_key = None
         ss.questions = []
         ss.current_question_index = 0
         ss.interview_history = []
         ss.feedback = None
-        # Clear spoken flags
+        ss.suggested_answers = None
         for k in [k for k in ss.keys() if isinstance(k, str) and k.startswith("spoken_q")]:
             del ss[k]
         st.rerun()
 
     if st.button("Upload New Resume"):
-        # Best-effort stop if recording
         if ss.get("is_recording", False):
             try:
                 stop_recording()
@@ -545,8 +769,6 @@ if ss.stage == "feedback":
                 pass
             ss.is_recording = False
             ss.recording_path = None
-
-        # Full reset (also cleans prior resume file)
         cleanup_temp_file(ss.get("temp_resume_path"))
         for key in list(ss.keys()):
             del ss[key]
