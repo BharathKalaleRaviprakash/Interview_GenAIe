@@ -5,7 +5,8 @@ from elevenlabs.client import ElevenLabs
 from elevenlabs.play import play
 import numpy as np
 import time
-import os
+import os, io
+import streamlit as st 
 
 from utils.config import (
     ELEVENLABS_API_KEY,
@@ -32,29 +33,152 @@ def _fallback_say(text: str):
     est = max(0.5, len(text.split()) / 3.0)
     time.sleep(est)
 
-def speak_text(text: str) -> None:
-    """TTS via ElevenLabs v2; graceful console fallback."""
-    if not text:
-        return
+import io, time
+from typing import Optional
 
-    if not el_client:
-        print("[INFO] ElevenLabs not configured; printing instead.")
-        print(f"Interviewer: {text}")
-        return
+# --- TTS bytes + browser autoplay helpers ---
 
+import base64
+import streamlit as st
+import streamlit.components.v1 as components
+
+def _ensure_bytes(audio_obj) -> bytes:
+    if isinstance(audio_obj, (bytes, bytearray)):
+        return bytes(audio_obj)
+    chunks = []
+    for ch in audio_obj:
+        if not ch:
+            continue
+        chunks.append(bytes(ch) if not isinstance(ch, (bytes, bytearray)) else ch)
+    return b"".join(chunks)
+
+def _resolve_voice_id(cli, hint: str | None) -> str | None:
+    hint = (hint or "").strip()
+    if hint and hint.isalnum() and len(hint) >= 18:
+        return hint
     try:
-        audio = el_client.text_to_speech.convert(
+        res = cli.voices.search(query=hint or "Rachel")
+        if getattr(res, "voices", None):
+            exact = next((v for v in res.voices if v.name.lower() == (hint or "Rachel").lower()), None)
+            return (exact or res.voices[0]).voice_id
+    except Exception as e:
+        print(f"[TTS] Voice search failed: {e}")
+    return None
+
+def speak_text_bytes(text: str, voice_hint: str | None = None) -> bytes | None:
+    """Return MP3 bytes for the given text (no local playback)."""
+    text = (text or "").strip()
+    if not text or not el_client:
+        return None
+    try:
+        # free device if busy
+        try:
+            sd.stop()
+        except Exception:
+            pass
+
+        vid = _resolve_voice_id(el_client, voice_hint or ELEVENLABS_VOICE_ID or "Rachel")
+        if not vid:
+            return None
+        stream = el_client.text_to_speech.convert(
+            voice_id=vid,
             text=text,
-            voice_id=ELEVENLABS_VOICE_ID,           # e.g. "JBFqnCBsd6RMkjVDRZzb"
             model_id="eleven_multilingual_v2",
             output_format="mp3_44100_128",
         )
-        play(audio)
+        return _ensure_bytes(stream)
     except Exception as e:
-        print(f"[ERROR] ElevenLabs TTS: {e}")
-        print(f"Interviewer: {text}")  # fallback
+        print(f"[TTS] speak_text_bytes failed: {e}")
+        return None
 
+def autoplay_audio_in_browser(audio_bytes: bytes, key: str = "tts") -> None:
+    """Try to autoplay; if blocked, arm the next click/keypress to play it."""
+    if not audio_bytes:
+        return
+    b64 = base64.b64encode(audio_bytes).decode()
+    components.html(
+        f"""
+        <audio id="{key}" src="data:audio/mp3;base64,{b64}" autoplay></audio>
+        <script>
+          (function() {{
+            const el = document.getElementById("{key}");
+            function arm() {{
+              const go = () => {{
+                el.play().catch(()=>{{}});
+                window.removeEventListener('pointerdown', go);
+                window.removeEventListener('keydown', go);
+              }};
+              window.addEventListener('pointerdown', go, {{ once: true }});
+              window.addEventListener('keydown', go, {{ once: true }});
+            }}
+            el.play().catch(arm);
+          }})();
+        </script>
+        """,
+        height=0
+    )
 
+def speak_text(
+    text: str,
+    *,
+    voice_id: str | None = None,
+    show_in_streamlit: bool = True,
+    also_play_locally: bool = False  # plays on server/host speakers
+) -> bool:
+    text = (text or "").strip()
+    if not text:
+        return False
+
+    if not el_client or not ELEVENLABS_API_KEY:
+        print("[INFO] ElevenLabs not configured; printing instead.")
+        _fallback_say(text)
+        if st: st.info("TTS fallback (no API key).")
+        return False
+
+    # Free any busy audio device
+    try: sd.stop()
+    except Exception: pass
+
+    vid = _resolve_voice_id(el_client, voice_id or ELEVENLABS_VOICE_ID or "Rachel")
+    if not vid:
+        if st: st.warning("Could not resolve ElevenLabs voice. Set ELEVENLABS_VOICE_ID to a valid id or a name like 'Rachel'.")
+        _fallback_say(text)
+        return False
+
+    try:
+        # Your SDK returns a streaming generator here:
+        audio_stream = el_client.text_to_speech.convert(
+            voice_id=vid,
+            text=text,
+            model_id="eleven_multilingual_v2",
+            output_format="mp3_44100_128",
+        )
+
+        # 🔧 Convert generator → bytes once
+        audio_bytes = _ensure_bytes(audio_stream)
+        if not audio_bytes:
+            raise RuntimeError("TTS returned empty audio")
+
+        # Browser playback (Streamlit)
+        if show_in_streamlit and st:
+            st.audio(io.BytesIO(audio_bytes), format="audio/mp3")
+
+        # Optional: server/desktop speakers
+        if also_play_locally:
+            try:
+                play(audio_bytes)
+            except Exception as pe:
+                print(f"[TTS] Local playback error: {pe}")
+
+        print(f"[TTS] OK: {len(text.split())} words, {len(audio_bytes)} bytes, voice_id={vid}")
+        return True
+
+    except Exception as e:
+        print(f"[TTS] ElevenLabs error: {e}")
+        _fallback_say(text)
+        if st: st.error(f"ElevenLabs TTS failed: {e}")
+        return False
+   
 def record_audio(
     duration: int = RECORDING_DURATION_SECONDS,
     filename: str = TEMP_AUDIO_FILENAME) -> str | None:

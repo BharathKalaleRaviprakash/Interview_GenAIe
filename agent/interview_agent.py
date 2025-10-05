@@ -59,6 +59,7 @@ class InterviewAgent:
         self.current_round_info = round_info
         round_name = round_info['name']
         num_questions = round_info['num_questions']
+        num_questions = 1
         self.interview_history = []
 
         print(f"\n--- Starting {round_name} Round ---")

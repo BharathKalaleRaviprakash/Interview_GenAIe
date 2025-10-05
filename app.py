@@ -5,6 +5,7 @@ import traceback
 import hashlib
 import uuid
 from pathlib import Path
+import io
 
 # --- Core / Agents ---
 from core.resume_parser import parse_resume
@@ -13,7 +14,7 @@ from agent.interview_agent import InterviewAgent
 from utils.config import TEMP_AUDIO_FILENAME
 
 # --- Audio I/O (TTS + STT) ---
-from core.audio_io import speak_text, transcribe_audio
+from core.audio_io import speak_text, transcribe_audio, speak_text_bytes
 # (we won't use record_audio anymore because we implement async start/stop here)
 
 # --- Feedback ---
@@ -177,6 +178,10 @@ st.sidebar.info(
 )
 
 # ---------- Helpers ----------
+def cleanup_all_recordings():
+    for f in Path("data/recordings").glob("temp_user_response_*.wav"):
+        safe_delete(f)
+
 @st.cache_data(show_spinner=False)
 def _parse_resume_cached(path: str, file_hash: str) -> str | None:
     return parse_resume(path)
@@ -234,6 +239,9 @@ ss.setdefault("temp_resume_path", None)
 # recording state
 ss.setdefault("is_recording", False)
 ss.setdefault("recording_path", None)
+ss.setdefault("rec_audio", {})       # {qid: bytes of the last recording}
+ss.setdefault("rec_transcript", {})  # {qid: str transcript}
+
 
 # ---------- Keys / Feature flags ----------
 missing = []
@@ -328,187 +336,136 @@ if ss.stage == "select_round":
             st.warning("Please select a round first.")
 
 # ---------- Stage 3: Interviewing ----------
+# ---------- Stage 3: Interviewing ----------
 if ss.stage == "interviewing":
     round_name = AVAILABLE_ROUNDS[ss.selected_round_key]["name"]
     st.header(f"Interviewing: {round_name}")
 
+    # Guard: no questions / end of interview
     if not ss.questions:
-        st.error("No questions loaded for this round. Please go back and select again.")
-        if st.button("Go Back"):
-            # best-effort stop if recording
-            if ss.get("is_recording", False):
+        st.error("No questions available. Please start a round again.")
+        st.stop()
+    if ss.current_question_index >= len(ss.questions):
+        ss.stage = "feedback"
+        st.rerun()
+
+    # Current question
+    question_text = ss.questions[ss.current_question_index]
+    st.markdown(f"**Interviewer:** {question_text}")
+
+    # --- TTS per question (generate once) ---
+    qid = f"hr-q-{ss.current_question_index}"
+    if "tts_audio" not in ss:
+        ss["tts_audio"] = {}
+    if "tts_done" not in ss:
+        ss["tts_done"] = {}
+
+    if not ss["tts_done"].get(qid):
+        tts_bytes = speak_text_bytes(question_text)  # MP3 bytes
+        if tts_bytes:
+            ss["tts_audio"][qid] = tts_bytes
+        ss["tts_done"][qid] = True
+
+    tts_bytes = ss["tts_audio"].get(qid)
+    if tts_bytes:
+        st.audio(io.BytesIO(tts_bytes), format="audio/mp3")
+    else:
+        st.warning("TTS not available (check API key/voice/quota).")
+
+    # --- Recording controls ---
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        # Start
+        if not ss.is_recording and st.button("🎙️ Start recording"):
+            try:
+                path = start_recording(TEMP_AUDIO_FILE, samplerate=16000, channels=1)
+                ss.is_recording = True
+                ss.recording_path = path
+                st.toast("Recording started…", icon="🎙️")
+            except Exception as e:
+                st.error(f"Failed to start recording: {e}")
+        elif ss.is_recording:
+            st.info("Recording… click Stop when done.")
+
+    with col2:
+        # Stop -> auto-transcribe
+        if ss.is_recording and st.button("⏹ Stop (auto-transcribe)"):
+            try:
+                path = stop_recording()
+            except Exception as e:
+                path = None
+                st.error(f"Failed to stop recording: {e}")
+            ss.is_recording = False
+            path = path or ss.recording_path
+
+            # Read bytes for preview BEFORE deleting
+            if path and os.path.exists(path):
+                try:
+                    with open(path, "rb") as f:
+                        audio_bytes = f.read()
+                    ss.rec_audio[qid] = audio_bytes
+
+                    # Auto-transcribe directly from the file
+                    text = transcribe_audio(path)
+                    if text:
+                        ss.rec_transcript[qid] = text
+                        st.success("Transcription captured ✅")
+                    else:
+                        st.warning("No transcription captured (silence/network/API).")
+                finally:
+                    ss.recording_path = None
+            else:
+                st.warning("No audio file found after stop.")
+
+    with col3:
+        # Re-record: flush & start fresh immediately
+        if st.button("🔁 Re-record"):
+            ss.rec_audio.pop(qid, None)
+            ss.rec_transcript.pop(qid, None)
+            # stop any stray stream
+            if ss.is_recording:
                 try:
                     stop_recording()
                 except Exception:
                     pass
                 ss.is_recording = False
-                ss.recording_path = None
-            ss.stage = "select_round"
-            st.rerun()
-        st.stop()
-
-    q_idx = ss.current_question_index
-    if q_idx < len(ss.questions):
-        question = ss.questions[q_idx]
-        st.subheader(f"Question {q_idx + 1}/{len(ss.questions)}")
-        st.markdown(f"**Interviewer:** {question}")
-
-        # Speak only once per question
-        spoken_flag = f"spoken_q{q_idx}"
-        if not ss.get(spoken_flag, False):
+            # start a fresh recording
             try:
-                speak_text(question)
+                path = start_recording(TEMP_AUDIO_FILE, samplerate=16000, channels=1)
+                ss.is_recording = True
+                ss.recording_path = path
+                st.toast("Recording restarted…", icon="🔁")
             except Exception as e:
-                st.warning(f"Could not play question audio: {e}")
-            ss[spoken_flag] = True
+                st.error(f"Failed to start new recording: {e}")
 
-        st.markdown("**Record your answer:**")
-
-        # Unique temp filename per question; force .wav for consistency
-        q_audio_path = str(
-            Path(TEMP_AUDIO_FILE).with_suffix("").with_name(
-                f"{Path(TEMP_AUDIO_FILE).stem}_q{q_idx}.wav"
-            )
-        )
-
-        c1, c2, c3 = st.columns(3)
-
-        # START
-        with c1:
-            has_prior_take = bool(ss.get(f"audio_path_q{q_idx}") or ss.get(f"transcript_q{q_idx}"))
-            start_disabled = ss.get("is_recording", False) or has_prior_take
-            if st.button("▶️ Start Recording", disabled=start_disabled, key=f"start_q{q_idx}"):
-                try:
-                    # If somehow a prev recording was hanging, stop it
-                    if ss.get("is_recording", False):
-                        try:
-                            stop_recording()
-                        except Exception:
-                            pass
-                        ss.is_recording = False
-                        ss.recording_path = None
-
-                    start_recording(q_audio_path, samplerate=16000, channels=1)
-                    ss.is_recording = True
-                    ss.recording_path = q_audio_path
-                    st.toast("Recording started")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Could not start recording: {e}")
-
-        # STOP
-        with c2:
-            stop_disabled = not ss.get("is_recording", False)
-            if st.button("⏹ Stop Recording", disabled=stop_disabled, key=f"stop_q{q_idx}"):
-                try:
-                    final_path = stop_recording()  # may return None on failure
-                except Exception as e:
-                    final_path = None
-                    st.error(f"Could not stop recording: {e}")
-
-                ss.is_recording = False
-
-                # Prefer the returned path; else fall back to the known path
-                if final_path and os.path.exists(final_path):
-                    ss[f"audio_path_q{q_idx}"] = final_path
-                elif ss.get("recording_path") and os.path.exists(ss["recording_path"]):
-                    ss[f"audio_path_q{q_idx}"] = ss["recording_path"]
-                else:
-                    ss[f"audio_path_q{q_idx}"] = None
-
-                ss.recording_path = None
-
-                # Small delay before any operation on the file (Windows handle release)
-                time.sleep(0.25)
-
-                # Auto-transcribe on stop if we have a file
-                if ss.get(f"audio_path_q{q_idx}"):
-                    with st.spinner("Transcribing..."):
-                        try:
-                            txt = transcribe_audio(ss[f"audio_path_q{q_idx}"]) or ""
-                        except Exception as e:
-                            st.warning(f"Transcription error: {e}")
-                            txt = ""
-                        ss[f"transcript_q{q_idx}"] = txt
-                        if not txt:
-                            st.warning("Could not transcribe that recording. You can re-record.")
-                else:
-                    st.warning("No audio captured. Try recording again.")
-                st.rerun()
-
-        # SUBMIT
-        with c3:
-            submit_disabled = ss.get("is_recording", False)
-            if st.button("✅ Submit Answer", disabled=submit_disabled, key=f"submit_q{q_idx}"):
-                answer_text = ss.get(f"transcript_q{q_idx}", "") or "[No response recorded]"
-                ss.interview_history.append({"question": question, "answer": answer_text})
-
-                # Clean last temp audio eagerly (Windows-safe)
-                safe_delete(ss.get(f"audio_path_q{q_idx}"))
-                for k in (f"audio_path_q{q_idx}", f"transcript_q{q_idx}"):
-                    if k in ss:
-                        del ss[k]
-
+    with col4:
+        # Submit -> save + next (or feedback)
+        disabled = not bool(ss.rec_transcript.get(qid))
+        if st.button("✅ Submit", disabled=disabled):
+            text = ss.rec_transcript.get(qid)
+            if not text:
+                st.warning("Please record (and let it auto-transcribe) before submitting.")
+            else:
+                ss.interview_history.append({"question": question_text, "answer": text})
+                # clear per-Q buffers
+                ss.rec_audio.pop(qid, None)
+                ss.rec_transcript.pop(qid, None)
+                ss["tts_done"].pop(qid, None)
+                ss["tts_audio"].pop(qid, None)
+                # advance or finish
                 ss.current_question_index += 1
-                if ss.current_question_index < len(ss.questions):
-                    try:
-                        speak_text("Okay, thank you. Next question.")
-                    except Exception as e:
-                        st.warning(f"Audio notification error: {e}")
+                if ss.current_question_index >= len(ss.questions):
+                    ss.stage = "feedback"
                 st.rerun()
 
-        # Show current state / controls below
-        if ss.get("is_recording", False):
-            st.info("🎙️ Recording... Click **Stop Recording** when you're done.")
-        elif has_prior_take:
-            st.info("A recording exists for this question. You can **Submit Answer** or **Re-record**.")
+    # --- Preview (if any) ---
+    if ss.rec_audio.get(qid):
+        st.audio(io.BytesIO(ss.rec_audio[qid]), format="audio/wav")
+    if ss.rec_transcript.get(qid):
+        st.markdown("**Transcript:**")
+        st.write(ss.rec_transcript[qid])
 
-        # Playback + transcript (if any)
-        if ss.get(f"audio_path_q{q_idx}"):
-            st.audio(ss[f"audio_path_q{q_idx}"])
-
-        transcript = ss.get(f"transcript_q{q_idx}", "")
-        if transcript:
-            st.markdown("**Transcript (auto-generated):**")
-            st.write(transcript)
-
-        # Re-record button
-        c_rr, _ = st.columns([1, 5])
-        with c_rr:
-            if st.button("↺ Re-record", key=f"rerecord_q{q_idx}"):
-                # If currently recording, stop first to avoid leaks
-                if ss.get("is_recording", False):
-                    try:
-                        stop_recording()
-                    except Exception:
-                        pass
-                    ss.is_recording = False
-
-                # Remove any existing audio/transcript for this question (Windows-safe)
-                safe_delete(ss.get(f"audio_path_q{q_idx}"))
-                for k in (f"audio_path_q{q_idx}", f"transcript_q{q_idx}"):
-                    if k in ss:
-                        del ss[k]
-                ss.recording_path = None
-                st.rerun()
-
-    else:
-        # best-effort stop if recording (avoid dangling handles)
-        if ss.get("is_recording", False):
-            try:
-                stop_recording()
-            except Exception:
-                pass
-            ss.is_recording = False
-            ss.recording_path = None
-
-        st.success("All questions for this round are completed.")
-        ss.stage = "feedback"
-        try:
-            speak_text("Thank you. That concludes this round. I will now prepare your feedback.")
-        except Exception as e:
-            st.warning(f"Audio notification error: {e}")
-        st.rerun()
 
 # ---------- Stage 4: Feedback ----------
 if ss.stage == "feedback":
