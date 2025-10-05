@@ -2,8 +2,6 @@ streamlit
 sqlalchemy
 google-genai>=0.3.0
 pydantic>=2.7.0
-sounddevice
-soundfile
 numpy
 speechrecognition
 elevenlabs
@@ -11,3 +9,8 @@ python-dotenv
 pypdf
 chromadb
 sentence-transformers
+
+streamlit
+streamlit-mic-recorder
+openai>=1.40.0
+pydantic
