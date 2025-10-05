@@ -26,6 +26,7 @@ from core.resume_parser import classify_document
 HAVE_MIC_RECORDER = False
 HAVE_AUDIO_RECORDER = False
 MIC_IMPORT_ERROR = None
+CONTACT_EMAIL = st.secrets.get("CONTACT_EMAIL", "jahnaviashok99@gmail.com")
 
 try:
     from streamlit_mic_recorder import mic_recorder, speech_to_text
@@ -129,8 +130,15 @@ st.sidebar.markdown(
     </div>
 
     <div class="sb-card cta">
-      <div class="kv"><span>Help</span><span>📧 <a href="mailto:support@example.com">Contact</a></span></div>
-      <div class="kv"><span>Source</span><span>🌐 <a href="https://github.com/your/repo" target="_blank">GitHub</a></span></div>
+      <div class="kv">
+        <span>Help</span>
+        <span>📧 <a href="mailto:{CONTACT_EMAIL}?subject=Interview%20GenAIe%20support&body=Hi%20team%2C%0A%0A(Describe%20your%20issue%20here)%0A"
+                 >Contact</a></span>
+      </div>
+      <div class="kv">
+        <span>Source</span>
+        <span>🌐 <a href="https://github.com/BharathKalaleRaviprakash/Interview_GenAIe" target="_blank">GitHub</a></span>
+      </div>
     </div>
     """,
     unsafe_allow_html=True,
