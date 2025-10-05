@@ -1,6 +1,8 @@
 # core/audio_io.py
 from __future__ import annotations
-import io, os, tempfile
+import io, os
+import uuid
+from pathlib import Path
 import streamlit as st
 
 # ---- Config from secrets/env via utils/config.py ----
@@ -16,7 +18,14 @@ try:
 except Exception:
     HAVE_SD = False
 
+import speech_recognition as sr
+r = sr.Recognizer()
+
 DEFAULT_RACHEL_ID = "21m00Tcm4TlvDq8ikWAM"
+
+# ---------- ALL AUDIO SAVED HERE ----------
+UPLOAD_DIR = Path("data/uploads")
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 def _voice(v: str | None) -> str:
     if not v or len(v.strip()) < 10:
@@ -25,6 +34,14 @@ def _voice(v: str | None) -> str:
     if any(b in v for b in bad):
         return DEFAULT_RACHEL_ID
     return v.strip()
+
+def _save_bytes_to_uploads(audio_bytes: bytes, ext: str = "wav") -> Path:
+    """Persist audio bytes to data/uploads/<uuid>.<ext> and return the Path."""
+    fname = f"{uuid.uuid4().hex}.{ext.lstrip('.')}"
+    out_path = UPLOAD_DIR / fname
+    with open(out_path, "wb") as f:
+        f.write(audio_bytes)
+    return out_path
 
 # ============================ TTS ============================
 
@@ -55,7 +72,6 @@ def speak_text_bytes(text: str) -> bytes | None:
             st.warning(f"TTS (ElevenLabs) error: {e}")
 
     # Fallback: OpenAI TTS
-    # ---- Fallback: OpenAI TTS ----
     if OPENAI_API_KEY:
         try:
             from openai import OpenAI
@@ -64,16 +80,15 @@ def speak_text_bytes(text: str) -> bytes | None:
                 model="gpt-5-nano",   # or "gpt-4o-tts" if you have access
                 voice="alloy",
                 input=text,
-                response_format="mp3",    # <-- was 'format', must be 'response_format'
+                response_format="mp3",
             )
             return resp.read()  # bytes
         except Exception as e:
             st.warning(f"TTS (OpenAI) error: {e}")
 
+    return None
 
-        return None
-
-# Back-compat alias (some modules may still call speak_text)
+# Back-compat alias
 def speak_text(text: str) -> bytes | None:
     return speak_text_bytes(text)
 
@@ -81,25 +96,30 @@ def speak_text(text: str) -> bytes | None:
 
 def transcribe_audio_bytes(audio_bytes: bytes) -> str:
     """
-    Transcribe audio bytes using OpenAI. Tries 'gpt-4o-transcribe', falls back to 'whisper-1'.
+    Persist bytes to data/uploads/*.wav and send that file to OpenAI STT.
+    This avoids Windows temp-file locks.
     """
     if not OPENAI_API_KEY:
         return ""
     try:
+        # Save to uploads (keep file as requested)
+        wav_path = _save_bytes_to_uploads(audio_bytes, ext="wav")
+
         from openai import OpenAI
         client = OpenAI(api_key=str(OPENAI_API_KEY).strip())
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
-            tmp.write(audio_bytes)
-            tmp.flush()
+
+        # Open the saved file ONLY within a context manager, so Windows releases the lock immediately after.
+        with open(wav_path, "rb") as f:
             try:
                 resp = client.audio.transcriptions.create(
                     model="gpt-4o-transcribe",
-                    file=open(tmp.name, "rb"),
+                    file=f,
                 )
             except Exception:
+                f.seek(0)
                 resp = client.audio.transcriptions.create(
                     model="whisper-1",
-                    file=open(tmp.name, "rb"),
+                    file=f,
                 )
         return getattr(resp, "text", "") or ""
     except Exception as e:
@@ -107,11 +127,30 @@ def transcribe_audio_bytes(audio_bytes: bytes) -> str:
         return ""
 
 def transcribe_audio(file_path: str) -> str:
-    """Convenience wrapper for path-based calls."""
+    """
+    Transcribe an existing file path in data/uploads (or anywhere readable).
+    Opens once in a context manager to avoid PermissionError on Windows.
+    """
+    if not OPENAI_API_KEY:
+        return ""
     try:
+        from openai import OpenAI
+        client = OpenAI(api_key=str(OPENAI_API_KEY).strip())
         with open(file_path, "rb") as f:
-            return transcribe_audio_bytes(f.read())
-    except Exception:
+            try:
+                resp = client.audio.transcriptions.create(
+                    model="gpt-4o-transcribe",
+                    file=f,
+                )
+            except Exception:
+                f.seek(0)
+                resp = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=f,
+                )
+        return getattr(resp, "text", "") or ""
+    except Exception as e:
+        st.warning(f"Transcription error: {e}")
         return ""
 
 # ======================= (Optional) Local Recording =======================
