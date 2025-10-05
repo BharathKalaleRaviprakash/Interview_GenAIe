@@ -111,3 +111,7 @@ def record_audio(seconds: int = 10, samplerate: int = 16000, channels: int = 1) 
     buf = io.BytesIO()
     sf.write(buf, frames, samplerate, format="WAV")
     return buf.getvalue()
+
+def speak_text(*args, **kwargs):
+    """Alias to the new speak_text_bytes; returns MP3 bytes or None."""
+    return speak_text_bytes(*args, **kwargs)
