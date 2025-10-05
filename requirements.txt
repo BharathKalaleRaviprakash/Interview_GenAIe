@@ -14,9 +14,9 @@ elevenlabs>=1.3.0
 aiohttp>=3.9.5
 
 # --- Resume parsing ---
-pymupdf==1.24.9          # provides import fitz (Python ≤3.12)
 docx2txt>=0.8
-pypdf>=4.3.1             # fallback if PyMuPDF unavailable
+
+pypdf>=4.3.1           # fallback if PyMuPDF unavailable
 
 # --- Light STT (optional fallback) ---
 faster-whisper>=1.0.3    # safe pure-Python option; optional
