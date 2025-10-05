@@ -10,6 +10,8 @@ watchdog>=4.0.1
 
 # --- OpenAI + ElevenLabs (optional AI APIs) ---
 openai>=1.40.0
+langchain>=0.2.15
+langchain-openai>=0.1.23
 elevenlabs>=1.3.0
 aiohttp>=3.9.5
 
