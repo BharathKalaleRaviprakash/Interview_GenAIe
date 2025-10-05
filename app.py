@@ -263,16 +263,6 @@ ss.setdefault("tts_done", {})
 # app.py (imports)
 from core.name_extractor import extract_candidate_name
 
-# ... after successful parse & validation ...
-full_name, first_name = extract_candidate_name(ss.resume_text)
-ss.candidate_name = full_name or ss.get("candidate_name") or ""
-ss.candidate_first = first_name or (ss.candidate_name.split()[0] if ss.candidate_name else "")
-
-st.success("Resume parsed and validated successfully! ✅")
-ss.candidate_name = st.text_input("Confirm your name", value=ss.candidate_name).strip()
-if ss.candidate_name:
-    ss.candidate_first = ss.candidate_name.split()[0].title()
-
 
 
 # ---------- Stage 1: Upload ----------
@@ -311,9 +301,16 @@ if ss.stage == "upload":
                             "jd_signals": info.get("jd_signals"),
                         })
                     st.stop()  # stay on the upload page
+                
+                # ... after successful parse & validation ...
+                full_name, first_name = extract_candidate_name(ss.resume_text)
+                ss.candidate_name = full_name or ss.get("candidate_name") or ""
+                ss.candidate_first = first_name or (ss.candidate_name.split()[0] if ss.candidate_name else "")
 
-                # Passed strict validation — proceed
                 st.success("Resume parsed and validated successfully! ✅")
+                ss.candidate_name = st.text_input("Confirm your name", value=ss.candidate_name).strip()
+                if ss.candidate_name:
+                    ss.candidate_first = ss.candidate_name.split()[0].title()
                 try:
                     ss.interview_agent = InterviewAgent(ss.resume_text)
                     ss.stage = "select_round"
