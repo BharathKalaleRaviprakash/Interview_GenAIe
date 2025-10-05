@@ -3,6 +3,7 @@ from core.llm_service import generate_completion
 from core.audio_io import speak_text, record_audio, transcribe_audio
 from core.feedback_generator import generate_feedback_and_scores
 from prompts.question_prompts import get_question_generation_prompt
+import re, ast
 
 class InterviewAgent:
     def __init__(self, resume_text:str):
@@ -17,7 +18,8 @@ class InterviewAgent:
         raw_response = generate_completion(prompt, max_tokens=300 * num_of_questions, temperature=0.6)
 
         try:
-            raw_response = raw_response.strip().strip('```python').strip('```').strip()
+            # inside _generate_questions, before literal_eval
+            raw_response = re.sub(r"^```(?:python)?\s*|\s*```$", "", raw_response.strip(), flags=re.IGNORECASE)
             questions = ast.literal_eval(raw_response)
             if isinstance(questions, list) and all(isinstance(q, str)
             for q in questions):
@@ -43,7 +45,7 @@ class InterviewAgent:
             else:
                 print("Could not generate questions properly. Using generic questions.")
                 return [
-                    f"Tell me about your experience relevant to the {round_name} role based on your resume.", "What is your biggesr strength related to this area?", "Can you describe a challenge you faced and how you overcame it?", "Where do you see yourself in 5 years?", "Do you have any questions for me?"
+                    f"Tell me about your experience relevant to the {round_name} role based on your resume.", "What is your biggest  strength related to this area?", "Can you describe a challenge you faced and how you overcame it?", "Where do you see yourself in 5 years?", "Do you have any questions for me?"
                 ][:num_of_questions]
             
 
@@ -99,9 +101,9 @@ class InterviewAgent:
         print("\n[ Suggestions for Improvement ]")
         print(self.feedback.get("suggestions", "N/A"))
 
-        print("\n [ Scored per Question ]")
-
-        scores = self.feedback.get("scored_per_question", [])
+        print("\n[ Scores per Question ]")
+        scores = self.feedback.get("scores_per_question", [])  # <-- changed key
+        
         if scores and len(scores) == len(self.interview_history):
             for i, score in enumerate(scores):
                 print(f" Q{i+1}: {score}/10")

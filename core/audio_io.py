@@ -2,7 +2,8 @@ import sounddevice as sd
 import soundfile as sf
 import speech_recognition as sr
 from elevenlabs.client import ElevenLabs
-from elevenlabs import play, Voice, VoiceSettings
+from elevenlabs.play import play
+from elevenlabs import Voice, VoiceSettings
 import numpy as np
 import time
 import os
@@ -13,7 +14,7 @@ from utils.config import (
     RECORDING_SAMPLE_RATE,
     RECORDING_CHANNELS,
     RECORDING_DURATION_SECONDS,
-    TEMP_AUDIO_FILE,
+    TEMP_AUDIO_FILENAME,
 )
 
 # ---------- ElevenLabs client (robust init) ----------
@@ -66,8 +67,7 @@ def speak_text(text: str):
 
 def record_audio(
     duration: int = RECORDING_DURATION_SECONDS,
-    filename: str = TEMP_AUDIO_FILE
-) -> str | None:
+    filename: str = TEMP_AUDIO_FILENAME) -> str | None:
     """Record a short clip and save to WAV."""
     try:
         os.makedirs(os.path.dirname(filename), exist_ok=True)
@@ -108,7 +108,7 @@ def record_audio(
         print("[ERROR] Recording failed:", e)
         return None
 
-def transcribe_audio(filename: str = TEMP_AUDIO_FILE) -> str | None:
+def transcribe_audio(filename: str = TEMP_AUDIO_FILENAME) -> str | None:
     """Transcribe a WAV file with Google Web Speech; returns None on failure."""
     print(f"Transcribing audio from {filename}...")
     if not filename or not os.path.exists(filename):

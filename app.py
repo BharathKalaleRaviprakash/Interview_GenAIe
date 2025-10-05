@@ -11,20 +11,55 @@ from core.audio_io import speak_text, transcribe_audio
 from core.feedback_generator import generate_feedback_and_scores
 from utils.config import TEMP_AUDIO_FILENAME
 from utils import config
+from pathlib import Path
 
 
 st.set_page_config(page_title="AceBot Interviewer", layout="wide")
 
 UPLOAD_DIR = "data/uploads"
 
-def save_uploaded_file(uploaded_file):
-    """"Saves uploaded file temporarily for parsing"""
+import hashlib
+from core.resume_parser import parse_resume  # you already import this
+
+@st.cache_data(show_spinner=False)
+def _parse_resume_cached(path: str, file_hash: str) -> str | None:
+    # cache key = (path, file_hash). If file changes, hash changes => re-run.
+    return parse_resume(path)
+
+def _hash_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):  # 1MB chunks
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def save_uploaded_file(uploaded_file) -> str | None:
+    """Save a Streamlit UploadedFile to disk and return the path."""
+    if not uploaded_file:
+        return None
     try:
-        os.makedirs(UPLOAD_DIR, exist_ok=True)
-        file_path = os.path.join(UPLOAD_DIR, uploaded_file)
-        with open(file_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        return file_path
+        # ensure dir exists
+        Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
+
+        # use the *name* (string), not the object; basic sanitization via Path.name
+        filename = Path(uploaded_file.name).name
+        dest = Path(UPLOAD_DIR) / filename
+
+        # avoid overwriting: add a counter if file exists
+        if dest.exists():
+            stem, suf = dest.stem, dest.suffix
+            i = 1
+            while dest.exists():
+                dest = Path(UPLOAD_DIR) / f"{stem}_{i}{suf}"
+                i += 1
+
+        # write bytes
+        uploaded_file.seek(0)  # reset pointer if it was read earlier
+        with open(dest, "wb") as f:
+            f.write(uploaded_file.getbuffer())  # or uploaded_file.read()
+
+        return str(dest)
     except Exception as e:
         st.error(f"Error in saving uploaded file: {e}")
         return None
@@ -49,7 +84,7 @@ if 'questions' not in st.session_state:
     st.session_state.questions = None
 if 'current_question_index' not in st.session_state:
     st.session_state.current_question_index = 0
-if 'interview_history' not in st. session_state:
+if 'interview_history' not in st.session_state:
     st.session_state.interview_history = []  # List of {'question': q, 'answer': a}
 if 'feedback' not in st.session_state:
     st.session_state.feedback = None
@@ -81,15 +116,18 @@ if st.session_state.stage == 'upload':
         #Save and parse
         st.session_state.temp_resume_path = save_uploaded_file(uploaded_file)
         if st.session_state.temp_resume_path:
+            file_hash = _hash_file(st.session_state.temp_resume_path)
             with st.spinner("Parsing resume..."):
-                st.session_state.resume_text = parse_resume(st.session_state.temp_resume_path)
+                st.session_state.resume_text = _parse_resume_cached(
+                    st.session_state.temp_resume_path, file_hash
+                )
         
             if st.session_state.resume_text: 
                 st.success("Resume parsed successfully!")
 
                 try:
-                    st.session_state.resume_text = InterviewAgent(st.session_state.resume_text)
-                    st.session_state.staeg = 'select_round'
+                    st.session_state.interview_agent  = InterviewAgent(st.session_state.resume_text)
+                    st.session_state.stage = 'select_round'
                     st.rerun()  #  Rerun to move to the next staeg UI immediately
                 
                 except Exception as e:
@@ -111,7 +149,7 @@ if st.session_state.stage == 'select_round':
 
     if not st.session_state.interview_agent:
         st.error("Interview agent not initialized. Please upload the resume first.")
-        st.session_state.stage = 'Upload' # Go back to upload stage
+        st.session_state.stage = 'upload' # Go back to upload stage
         # Clean up just in case
         cleanup_temp_file(st.session_state.temp_resume_path)
         st.session_state.temp_resume_path = None
@@ -133,8 +171,7 @@ if st.session_state.stage == 'select_round':
             # Generate questions for the round 
             agent = st.session_state.interview_agent
             if agent:
-                with st.spinner(f"Generating questions for the 
-                {selected_round_info['name']} round..."):
+                with st.spinner(f"Generating questions for the {selected_round_info['name']} round..."):
                     try:
                         # access internal method carefully (or refactor agent for this)
                         st.session_state.questions = agent._generate_questions(
@@ -145,17 +182,15 @@ if st.session_state.stage == 'select_round':
                         st.error(f"Error generating questions: {e}")
                         st.error(traceback.format_exc())  #Print detailed error
                         st.session_state.questions = []  # Ensure its empty on failure
-   
-                       
+
+                    
                 if st.session_state.questions:
                     st.session_state.stage = 'interviewing'
-                    st.success(f"Questions generated. Starting  the 
-                    {selected_round_info['name']} round!")
+                    st.success(f"Questions generated. Starting  the {selected_round_info['name']} round!")
                     time.sleep(1)  #Give user a moment to read the message
                     # Speak welcome message for the round
                     try:
-                        speak_text(f"Welcome to the {selected_round_info['name']} round. I will 
-                        ask you {len(st.session_state.questions)} questions. Let's begin with the first question.")
+                        speak_text(f"Welcome to the {selected_round_info['name']} round. I will ask you {len(st.session_state.questions)} questions. Let's begin with the first question.")
                     except Exception as e:
                         st.warning(f"Could not play welcome audio: {e}.Starting interview.")
                     st.rerun()
@@ -220,7 +255,7 @@ if st.session_state.stage == 'interviewing':
                 st.session_state.current_question_index += 1
 
                 # If there are more questions, speak the next one (or transition)
-                if st.session_state.current_question_index < len(st.session_state_questions):
+                if st.session_state.current_question_index < len(st.session_state.questions):
                     next_q_index = st.session_state.current_question_index
                     next_question = st.session_state.questions[next_q_index]
                     try:
@@ -251,7 +286,7 @@ if st.session_state.stage == 'interviewing':
 if st.session_state.stage == 'feedback':
     st.header("Interview Complete - Feedback")
     
-    Agent = st.session_state.interview_agent
+    agent = st.session_state.interview_agent
     round_name = AVAILABLE_ROUNDS[st.session_state.selected_round_key]['name']
 
     # Generate feedback only if it hasn't been generated yest for this round
@@ -269,32 +304,40 @@ if st.session_state.stage == 'feedback':
                 # Store feedback in agent as well if needed by its internal logic
                 # agent.feedback = st.session_state.feedback # if agent class uses self.feedback
             except Exception as e:
-            st.error(f"Failed to generate feedback: {e}")
-            st.error(traceback.format_exc())  # Print detailed error
+                st.error(f"Failed to generate feedback: {e}")
+                st.error(traceback.format_exc())  # Print detailed error
 
     # Display Feedback if available
     if st.session_state.feedback:
         feedback_data = st.session_state.feedback
 
         st.subheader("Overall Feedback")
-        st.markdown(feedback_data.get("Overall_feedback", "N/A"))
+        st.markdown(feedback_data.get("overall_feedback", "N/A"))
 
         st.subheader("Suggestions for Improvement")
-        st.markdown(feedback_data.get("Suggestions", "N/A"))
+        suggestions_val = feedback_data.get("suggestions", "N/A")
+        if isinstance(suggestions_val, list):
+            for s in suggestions_val:
+                st.markdown(f"- {s}")
+        else:
+            st.markdown(suggestions_val)
 
         st.subheader("Scores per Question")
-        score = feedback_data.get("Scores_per_question", [])
-        total_score = feedback_data.get("total_score", 0)
+        scores = feedback_data.get("scores_per_question", [])
+        total_score = int(feedback_data.get("total_score", 0))
         max_score = len(st.session_state.interview_history) * 10
 
-        if scores and len(scores)  == len(st.session_state.interview_history):
-            for i, score in enumerate(scores):
-                st.markdown(f"- **Q{i+1}:** {score}/10")
+        if scores and len(scores) == len(st.session_state.interview_history):
+            for i, sc in enumerate(scores):
+                st.markdown(f"- **Q{i+1}:** {int(sc)}/10")
         elif scores:
-            st.warning(f"Note: Number of scores ({len(scores)})
-            doesn't match number of questions ({len(st.session_state.interview_history)}). Display raw scores: {scores}")
+            st.warning(
+                f"Note: Number of scores ({len(scores)}) doesn't match number of questions "
+                f"({len(st.session_state.interview_history)}). Displaying raw scores: {scores}"
+            )
         else:
             st.markdown("Scores could not be determined.")
+
 
         st.subheader("Total Score for Round")
         if max_score > 0:
@@ -303,7 +346,7 @@ if st.session_state.stage == 'feedback':
             st.markdown("N/A (No questions answered)")
 
         # Optionally Show raw feedback for debugging
-        with st.expander("Show Raw Feedback Data (for debugging)")
+        with st.expander("Show Raw Feedback Data (for debugging)"):
             st.json(feedback_data)
 
     else:

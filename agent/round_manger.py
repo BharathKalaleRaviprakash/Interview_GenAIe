@@ -1,9 +1,9 @@
-AVAILABLE_ROUNDS = [
+AVAILABLE_ROUNDS = {
     "1": {"name": "HR", "num_questions": 5},
     "2": {"name": "Technical", "num_questions": 5},
     "3": {"name": "Managerial", "num_questions": 5},
     "4": {"name": "General", "num_questions": 5}
-]
+}
 
 def select_round() -> dict | None:
     print("\nSelect an Interview Round:")

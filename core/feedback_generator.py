@@ -1,4 +1,4 @@
-from core.llm_service import generate_completion
+from core.llm_service import get_llm
 from prompts.feedback_prompts import get_feedback_prompt
 import re
 
@@ -17,9 +17,7 @@ def generate_feedback_and_scores(resume_text: str, round_name: str, qa_pairs: li
     """
     print("\n Generating feedback and scores...")
     prompt = get_feedback_prompt(resume_text, round_name, qa_pairs)
-
-    raw_feedback = generate_completion(prompt, max_tokens=1000, temperature=0.5)
-
+    raw_feedback = get_llm(model="gpt-4o-mini", temperature=0.5, max_tokens=1000).invoke(prompt).content
     feedback_data = {
         "overall_feedback": "Could not parse feedback.",
         "suggestions": "Could not parse suggestions.",
@@ -29,10 +27,10 @@ def generate_feedback_and_scores(resume_text: str, round_name: str, qa_pairs: li
     }
     
     try:
-        overall_match = re.search(r"Overall Feedback:\s*(.*?)\s*Suggestions for Improvement: |$)", raw_feedback, re.IGNORECASE | re.DOTALL)
+        overall_match = re.search(r"Overall\s*Feedback:\s*(.*?)(?:\s*Suggestions\s*for\s*Improvement\s*:|$)", raw_feedback, re.IGNORECASE | re.DOTALL)
         if overall_match:
             feedback_data["overall_feedback"] = overall_match.group(1).strip()
-        suggestions_match = re.search(r"Suggestions for Improvement:\s*(.*?)\s*Scores per Question: |Total Score:|$)", raw_feedback, re.IGNORECASE | re.DOTALL)
+        suggestions_match = re.search(r"Suggestions\s*for\s*Improvement\s*:\s*(.*?)(?:\s*Scores\s*per\s*Question\s*:|\s*Total\s*Score\s*:|$)", raw_feedback, re.IGNORECASE | re.DOTALL)
         if suggestions_match:
             feedback_data["suggestions"] = suggestions_match.group(1).strip()
         score_matches = re.findall(r"Q\d+ Score:\s*(\d+)", raw_feedback, re.IGNORECASE)
