@@ -1,24 +1,18 @@
-# Core
-streamlit==1.38.0
-python-dotenv>=1.0.1
+streamlit
+sqlalchemy
+google-genai>=0.3.0
 pydantic>=2.7.0
-numpy>=1.24
-requests>=2.32.0
+numpy
+speechrecognition
+elevenlabs
+python-dotenv
+pypdf
+chromadb
+sentence-transformers
 
-# TTS / LLM (if you use them)
+streamlit
+streamlit-mic-recorder
 openai>=1.40.0
-elevenlabs>=1.3.0
 
-# Resume parsing
-pymupdf==1.24.9        # provides import fitz (needs Python <=3.12 on cloud)
-docx2txt>=0.8
-pypdf>=4.3.1           # fallback if PyMuPDF not available
+pymupdf==1.24.9          # <-- provides `import fitz`
 
-# Browser mic + audio utils + offline STT
-streamlit-mic-recorder==0.0.4
-soundfile==0.12.1
-faster-whisper==1.0.3
-
-# Keep ONLY if still used elsewhere
-# SpeechRecognition>=3.10.0
-# sounddevice>=0.4.6
