@@ -24,19 +24,38 @@ except Exception:
 
 
 # ============================ TTS ============================
+# core/audio_io.py (top)
+from utils.config import ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, OPENAI_API_KEY
+
+# Known safe public voice ID for "Rachel" (from ElevenLabs docs)
+DEFAULT_RACHEL_ID = "21m00Tcm4TlvDq8ikWAM"
+
+def _resolve_voice_id(v: str | None) -> str:
+    """
+    Returns a valid voice_id (UUID-like). If the provided value is missing or
+    looks like a pasted code snippet / placeholder, fall back to Rachel.
+    """
+    if not v:
+        return DEFAULT_RACHEL_ID
+    bad_patterns = ('_get_secret', 'st.secrets', 'os.getenv', 'default', '""', "''", 'VOICE_ID')
+    if any(p in v for p in bad_patterns):
+        return DEFAULT_RACHEL_ID
+    # crude UUID-ish check (ElevenLabs voice IDs are 22 chars base58; this len check is lenient)
+    if len(v.strip()) < 10:
+        return DEFAULT_RACHEL_ID
+    return v.strip()
 
 def speak_text_bytes(text: str) -> bytes | None:
-    """
-    Return MP3 bytes (ElevenLabs TTS) suitable for st.audio.
-    If ELEVENLABS_API_KEY is missing, returns None so the UI can show text fallback.
-    """
     if not text or not ELEVENLABS_API_KEY:
         return None
     try:
         from elevenlabs.client import ElevenLabs
         client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
+
+        voice_id = _resolve_voice_id(ELEVENLABS_VOICE_ID)
+
         stream = client.text_to_speech.convert(
-            voice_id=ELEVENLABS_VOICE_ID or "Rachel",
+            voice_id=voice_id,
             optimize_streaming_latency="0",
             output_format="mp3_44100_128",
             text=text,
@@ -49,7 +68,6 @@ def speak_text_bytes(text: str) -> bytes | None:
     except Exception as e:
         st.warning(f"TTS error: {e}")
         return None
-
 
 # ============================ STT ============================
 
