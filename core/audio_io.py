@@ -61,7 +61,7 @@ def speak_text_bytes(text: str) -> bytes | None:
             from openai import OpenAI
             client = OpenAI(api_key=str(OPENAI_API_KEY).strip())
             resp = client.audio.speech.create(
-                model="gpt-4o-mini-tts",   # or "gpt-4o-tts" if you have access
+                model="gpt-5-nano",   # or "gpt-4o-tts" if you have access
                 voice="alloy",
                 input=text,
                 response_format="mp3",    # <-- was 'format', must be 'response_format'
