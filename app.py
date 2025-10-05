@@ -24,6 +24,9 @@ from core.audio_io import speak_text_bytes, transcribe_audio_bytes, transcribe_a
 from core.resume_parser import classify_document
 from streamlit_mic_recorder import mic_recorder
 
+from core.demo_mode_llm import generate_llm_demo_qa
+
+
 # --- Feedback ---
 from core.feedback_generator import generate_feedback_and_scores
 
@@ -274,7 +277,7 @@ if ss.stage == "upload":
                 # Quick guard for scanned/image-only PDFs
                 if len(ss.resume_text.split()) < 50:
                     st.error("This file has very little selectable text (possibly a scanned PDF). Please upload a text-based PDF or DOCX resume.")
-                    cleanup_temp_file(ss.temp_resume_path)
+                    _cleanup_file(ss.temp_resume_path)
                     ss.temp_resume_path = None
                     ss.resume_text = None
                     st.stop()
@@ -368,51 +371,47 @@ if ss.stage == "select_round":
                 st.warning("Please select a round first.")
 
     with c2:
-        if st.button("🧪 Run Demo (auto-generate Q&A + feedback)", key="run_demo"):
-            info = AVAILABLE_ROUNDS.get(ss.selected_round_key) if ss.selected_round_key else None
-            if not info:
-                st.warning("Please select a round first.")
+            # New: Q&A-only LLM demo (no interview flow, no feedback)
+        if st.button("🧪 Generate Q&A Only (LLM, resume-based)", key="qa_only_demo"):
+            if not ss.resume_text or len(ss.resume_text.strip()) < 50:
+                st.warning("Please upload a résumé first (at least ~50 characters of text).")
             else:
-                # 1) Generate questions via existing agent
-                try:
-                    if hasattr(ss.interview_agent, "generate_questions"):
-                        demo_questions = ss.interview_agent.generate_questions(info["name"], info["num_questions"])
-                    else:
-                        demo_questions = ss.interview_agent._generate_questions(info["name"], info["num_questions"])  # noqa
-                except Exception as e:
-                    st.error(f"Error generating questions: {e}")
-                    demo_questions = []
-
-                # 2) Make demo answers (LLM if key, else offline)
-                demo_resume = ss.resume_text or (
-                    "Software/Data professional with experience in ML pipelines, GNN/LSTM models, and "
-                    "analytics dashboards. Led projects improving accuracy and speed, collaborating with cross-functional teams."
-                )
-                use_llm = bool(os.getenv("OPENAI_API_KEY"))
-                demo_answers = _demo_generate_answers_llm(demo_resume, demo_questions) if use_llm else _demo_generate_answers_offline(demo_resume, demo_questions)
-
-                # 3) Build Q/A pairs and jump to feedback
-                ss.questions = demo_questions
-                ss.interview_history = [
-                    {"question": q, "answer": (demo_answers[i] if i < len(demo_answers) else "")}
-                    for i, q in enumerate(demo_questions)
-                ]
-                ss.current_question_index = len(ss.questions)  # skip interviewing screen
-                ss.stage = "feedback"
-
-                # 4) Generate feedback immediately
-                round_name = info["name"]
-                with st.spinner("Generating demo feedback..."):
+                info = AVAILABLE_ROUNDS.get(ss.selected_round_key)
+                round_name = (info["name"] if info else "auto")
+                with st.spinner("Generating resume-based questions & answers..."):
                     try:
-                        ss.feedback = generate_feedback_and_scores(
-                            resume_text=demo_resume,
+                        qa_items = generate_llm_demo_qa(
+                            resume_text=ss.resume_text,
+                            role="Software Engineer / Data Scientist",
                             round_name=round_name,
-                            qa_pairs=ss.interview_history,
+                            num_questions=8,
+                            model=os.getenv("OPENAI_MODEL") or None,
+                            temperature=0.35,
                         )
                     except Exception as e:
-                        st.error(f"Failed to generate feedback: {e}")
-                        st.error(traceback.format_exc())
-                st.rerun()
+                        st.error(f"LLM generation failed: {e}")
+                        qa_items = []
+
+                if qa_items:
+                    st.markdown("---")
+                    st.subheader("Resume-Based Questions & Suitable Answers")
+                    md = ["# Questions & Answers\n"]
+                    for i, item in enumerate(qa_items, 1):
+                        st.markdown(f"**Q{i}. {item['question']}**")
+                        st.markdown(item["answer"])
+                        st.markdown("---")
+                        md.append(f"**Q{i}. {item['question']}**\n\n{item['answer']}\n\n---\n")
+
+                    st.download_button(
+                        "Download as Markdown",
+                        data=("".join(md)).encode("utf-8"),
+                        file_name="resume_based_q_and_a.md",
+                        mime="text/markdown",
+                        use_container_width=True,
+                    )
+                else:
+                    st.info("No Q&A generated. Check OpenAI credentials and try again.")
+
 
 
 # ---------- Stage 3: Interviewing ----------
