@@ -4,9 +4,9 @@ def _get(name, default=None):
     v = st.secrets.get(name, os.getenv(name, default))
     return v.strip() if isinstance(v, str) else v
 
-ELEVENLABS_API_KEY = _get("ELEVENLABS_API_KEY")
-ELEVENLABS_VOICE_ID = _get("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
 OPENAI_API_KEY = _get("OPENAI_API_KEY")
+ELEVENLABS_API_KEY = _get("ELEVENLABS_API_KEY")
+ELEVENLABS_VOICE_ID = _get("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")
 
 
 RECORDING_SAMPLE_RATE = 44100

@@ -14,3 +14,6 @@ streamlit
 streamlit-mic-recorder
 openai>=1.40.0
 pydantic
+
+pymupdf==1.24.9          # <-- provides `import fitz`
+
