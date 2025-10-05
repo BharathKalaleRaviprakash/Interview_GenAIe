@@ -4,9 +4,6 @@ def _get(name, default=None):
     v = st.secrets.get(name, os.getenv(name, default))
     return v.strip() if isinstance(v, str) else v
 
-# -------------------------------------------------------------------
-# 🔑 API KEYS (do NOT hardcode!)
-# -------------------------------------------------------------------
 OPENAI_API_KEY = _get("OPENAI_API_KEY")
 ELEVENLABS_API_KEY = _get("ELEVENLABS_API_KEY")
 ELEVENLABS_VOICE_ID = _get("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")
