@@ -21,7 +21,7 @@ from utils import config
 # --- Audio I/O (cloud-safe: no PortAudio) ---
 from core.audio_io import speak_text_bytes, transcribe_audio_bytes, transcribe_audio
 
-
+from core.resume_parser import classify_document
 from streamlit_mic_recorder import mic_recorder
 
 # --- Feedback ---
@@ -271,7 +271,35 @@ if ss.stage == "upload":
                 ss.resume_text = _parse_resume_cached(ss.temp_resume_path, file_hash)
 
             if ss.resume_text:
-                st.success("Resume parsed successfully!")
+                # Quick guard for scanned/image-only PDFs
+                if len(ss.resume_text.split()) < 50:
+                    st.error("This file has very little selectable text (possibly a scanned PDF). Please upload a text-based PDF or DOCX resume.")
+                    cleanup_temp_file(ss.temp_resume_path)
+                    ss.temp_resume_path = None
+                    ss.resume_text = None
+                    st.stop()
+
+                # STRICT: Only allow resumes
+                doc_type, info = classify_document(ss.resume_text)
+                if doc_type != "resume":
+                    pretty = doc_type.replace("_", " ")
+                    st.error(f"This looks like a *{pretty or 'non-resume document'}*, not a resume. Please upload a PDF/DOCX resume.")
+                    with st.expander("Why it was rejected"):
+                        st.write({
+                            "resume_score": info.get("resume_score"),
+                            "cover_score": info.get("cover_score"),
+                            "jd_score": info.get("jd_score"),
+                            "resume_signals": info.get("resume_signals"),
+                            "cover_signals": info.get("cover_signals"),
+                            "jd_signals": info.get("jd_signals"),
+                        })
+                    cleanup_temp_file(ss.temp_resume_path)
+                    ss.temp_resume_path = None
+                    ss.resume_text = None
+                    st.stop()  # stay on the upload page
+
+                # Passed strict validation — proceed
+                st.success("Resume parsed and validated successfully! ✅")
                 try:
                     ss.interview_agent = InterviewAgent(ss.resume_text)
                     ss.stage = "select_round"
@@ -280,8 +308,7 @@ if ss.stage == "upload":
                     st.error(f"Failed to initialize interview agent: {e}")
                     ss.resume_text = None
                     ss.interview_agent = None
-                    _cleanup_file(ss.temp_resume_path)
-                    ss.temp_resume_path = None
+
             else:
                 st.error("Could not extract text from the resume. Try a different file.")
                 _cleanup_file(ss.temp_resume_path)
