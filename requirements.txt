@@ -1,8 +1,10 @@
 # Core LLM + AI APIs
 openai>=1.0.0,<2
-elevenlabs>=2.10.0,<3   # stick to old API your code expects (v2+ needs code changes)
 
-# LangChain stack (pinned to play nice with Pydantic v2)
+# ElevenLabs Python SDK (v2 API — matches text_to_speech.convert usage)
+elevenlabs>=2.10.0,<3
+
+# LangChain stack (compatible with Pydantic v2)
 pydantic>=2.7,<3
 langchain>=0.2.16
 langchain-core>=0.2.38
@@ -12,15 +14,18 @@ langchain-openai>=0.1.24
 streamlit>=1.27.0
 
 # Resume parsing
-pymupdf>=1.22.0       # pip name is lowercase (NOT PyMuPDF)
+pymupdf>=1.22.0            # pip name is lowercase (NOT PyMuPDF)
 python-docx>=0.8.11
 pytesseract>=0.3.10
 Pillow>=10.0.0
 
+# Whisper (local transcription)
+openai-whisper             # requires FFmpeg; install torch separately (see below)
+
 # Audio I/O
 sounddevice>=0.4.6
 soundfile>=0.12.1
-SpeechRecognition>=3.10.0  # canonical package name
+SpeechRecognition>=3.10.0
 
 # Utilities
 numpy>=1.25.2

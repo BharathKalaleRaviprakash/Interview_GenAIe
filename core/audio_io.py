@@ -223,7 +223,7 @@ def record_audio(
         return None
 
 def transcribe_audio(filename: str = TEMP_AUDIO_FILENAME) -> str | None:
-    """Transcribe a WAV file with Google Web Speech; returns None on failure."""
+    """Transcribe a WAV file with Whisper using the speech_recognition library."""
     print(f"Transcribing audio from {filename}...")
     if not filename or not os.path.exists(filename):
         print(f"[ERROR] File not found: {filename}")
@@ -235,14 +235,16 @@ def transcribe_audio(filename: str = TEMP_AUDIO_FILENAME) -> str | None:
             r.adjust_for_ambient_noise(source, duration=0.2)
             audio_data = r.record(source)
 
-        # Add language for better accuracy; set show_all=True for debugging
-        text = r.recognize_google(audio_data, language="en-US")
+        # CORRECTED: Use 'model=' to specify the Whisper model size.
+        text = r.recognize_whisper(audio_data, model="tiny")
+        
         print(f"Transcription: {text}")
         return text
     except sr.UnknownValueError:
         print("[INFO] Could not understand the audio.")
-    except sr.RequestError as e:
-        print(f"[ERROR] Google SR request failed: {e}")
+    # NOTE: The RequestError is still here but generally irrelevant for *local* Whisper
+    except sr.RequestError as e: 
+        print(f"[ERROR] SR request failed: {e}") 
     except Exception as e:
         print(f"[ERROR] Transcription error: {e}")
     return None
