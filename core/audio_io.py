@@ -3,7 +3,6 @@ import soundfile as sf
 import speech_recognition as sr
 from elevenlabs.client import ElevenLabs
 from elevenlabs.play import play
-from elevenlabs import Voice, VoiceSettings
 import numpy as np
 import time
 import os
@@ -33,37 +32,28 @@ def _fallback_say(text: str):
     est = max(0.5, len(text.split()) / 3.0)
     time.sleep(est)
 
-def speak_text(text: str):
-    """TTS via ElevenLabs; graceful console fallback."""
+def speak_text(text: str) -> None:
+    """TTS via ElevenLabs v2; graceful console fallback."""
     if not text:
         return
+
     if not el_client:
         print("[INFO] ElevenLabs not configured; printing instead.")
-        _fallback_say(text)
+        print(f"Interviewer: {text}")
         return
 
     try:
-        print("Generating speech...")
-        voice_obj = Voice(
-            voice_id=ELEVENLABS_VOICE_ID,
-            settings=VoiceSettings(
-                stability=0.75,
-                similarity_boost=0.85,
-                style=0.1,
-                use_speaker_boost=True
-            )
-        )
-        audio = el_client.generate(
+        audio = el_client.text_to_speech.convert(
             text=text,
-            voice=voice_obj,
-            model="eleven_multilingual_v2"
+            voice_id=ELEVENLABS_VOICE_ID,           # e.g. "JBFqnCBsd6RMkjVDRZzb"
+            model_id="eleven_multilingual_v2",
+            output_format="mp3_44100_128",
         )
-        print("Speaking...")
         play(audio)
-        print("Done speaking.")
     except Exception as e:
         print(f"[ERROR] ElevenLabs TTS: {e}")
-        _fallback_say(text)
+        print(f"Interviewer: {text}")  # fallback
+
 
 def record_audio(
     duration: int = RECORDING_DURATION_SECONDS,
