@@ -3,7 +3,7 @@ import os, io
 from pathlib import Path
 from typing import Optional
 import fitz  # PyMuPDF
-import docx
+import docx2txt
 from PIL import Image
 import pytesseract
 
@@ -23,7 +23,7 @@ def _ensure_tesseract():
 
 def extract_text_from_docx(file_path: str) -> Optional[str]:
     try:
-        d = docx.Document(file_path)
+        d = docx2txt.Document(file_path)
         text = "\n".join(p.text for p in d.paragraphs if p.text)
         print(f"python-docx extracted {len(text)} characters.")
         return text or None
