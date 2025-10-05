@@ -7,22 +7,14 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
 from utils.config import OPENAI_API_KEY
 
-# ---------- LangChain factory ----------
-def get_llm(
-    model: str = "gpt-4o-mini",
-    temperature: float = 0.7,
-    max_tokens: Optional[int] = None,
-) -> ChatOpenAI:
+def get_llm(model: str = "gpt-4o-mini", temperature: float = 0.7, max_tokens: Optional[int] = None) -> ChatOpenAI:
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not set. Check your secrets/env.")
     return ChatOpenAI(model=model, temperature=temperature, api_key=OPENAI_API_KEY, max_tokens=max_tokens)
 
 def _lc_msg(msg: dict) -> BaseMessage:
-    role = msg.get("role", "user")
-    content = msg.get("content", "")
-    return SystemMessage(content=content) if role == "system" else HumanMessage(content=content)
+    return SystemMessage(content=msg["content"]) if msg.get("role") == "system" else HumanMessage(content=msg.get("content",""))
 
-# ---------- OpenAI SDK client (for JSON mode) ----------
 def _get_openai_client():
     key = OPENAI_API_KEY or os.getenv("OPENAI_API_KEY")
     if not key:
@@ -33,10 +25,7 @@ def _get_openai_client():
             key = None
     if not key:
         raise RuntimeError("OPENAI_API_KEY not found.")
-    try:
-        from openai import OpenAI  # openai>=1.x
-    except Exception as e:
-        raise RuntimeError(f"OpenAI SDK import failed: {e}")
+    from openai import OpenAI
     return OpenAI(api_key=key)
 
 def generate_completion(
@@ -46,19 +35,15 @@ def generate_completion(
     max_tokens: int = 800,
     temperature: float = 0.7,
     system_prompt: str = "You are a helpful AI assistant.",
-    # aliases / extras accepted by callers:
-    system: Optional[str] = None,                      # alias
+    system: Optional[str] = None,                 # alias
     stream: bool = False,
     extra_messages: Optional[Iterable[dict]] = None,
-    response_format: Optional[dict] = None,            # when set, use Chat Completions JSON mode
+    response_format: Optional[dict] = None,       # -> use Chat Completions JSON mode
 ) -> str | Generator[str, None, None]:
-    """
-    - If `response_format` is provided (e.g. {"type":"json_object"}), route to Chat Completions with JSON mode.
-    - Otherwise use LangChain's ChatOpenAI as before.
-    """
+
     sys_txt = (system or system_prompt or "").strip()
 
-    # ===== JSON mode path (Chat Completions) =====
+    # JSON mode path (Chat Completions)
     if response_format and not stream:
         client = _get_openai_client()
         messages = []
@@ -73,20 +58,19 @@ def generate_completion(
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                response_format=response_format,    # JSON mode here
+                response_format=response_format,     # {"type":"json_object"}
             )
-            return (resp.choices[0].message.content or "").strip()
         except TypeError:
-            # Older SDK without response_format support: try without it
+            # Older SDK without response_format support – try without it (we'll parse manually)
             resp = client.chat.completions.create(
                 model=model,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
-            return (resp.choices[0].message.content or "").strip()
+        return (resp.choices[0].message.content or "").strip()
 
-    # ===== Default LangChain path =====
+    # Default LangChain path
     try:
         llm = get_llm(model=model, temperature=temperature, max_tokens=max_tokens)
         msgs: list[BaseMessage] = []
@@ -116,7 +100,6 @@ def generate_completion(
             return text or "Error: No content in response."
         except Exception:
             return str(content) if content else "Error: No content in response."
-
     except Exception as e:
         logging.exception("Error during LLM call")
         msg = str(e)
