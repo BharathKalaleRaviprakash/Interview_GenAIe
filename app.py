@@ -22,7 +22,22 @@ from utils import config
 from core.audio_io import speak_text_bytes, transcribe_audio_bytes, transcribe_audio
 
 from core.resume_parser import classify_document
-from streamlit_mic_recorder import mic_recorder
+# --- Mic widgets (optional) ---
+HAVE_MIC_RECORDER = False
+HAVE_AUDIO_RECORDER = False
+MIC_IMPORT_ERROR = None
+
+try:
+    from streamlit_mic_recorder import mic_recorder, speech_to_text
+    HAVE_MIC_RECORDER = True
+except Exception as e:
+    MIC_IMPORT_ERROR = str(e)
+    try:
+        from audio_recorder_streamlit import audio_recorder
+        HAVE_AUDIO_RECORDER = True
+    except Exception:
+        pass
+
 
 from core.demo_mode_llm import generate_llm_demo_qa
 
@@ -304,7 +319,7 @@ def _ensure_more_questions(agent, round_name: str, batch: int = 5):
 
 # ---------- Stage 1: Upload ----------
 if ss.stage == "upload":
-    st.header("1) Upload Your Resume")
+    st.header("Upload Your Resume")
     uploaded_file = st.file_uploader("Choose a resume (PDF or DOCX)", type=["pdf", "docx"])
 
     if uploaded_file:
@@ -365,8 +380,11 @@ if ss.stage == "upload":
 
 # ---------- Stage 2: Select Round ----------
 if ss.stage == "select_round":
-    st.header("2) Select Interview Round")
-
+    st.header("Select Interview Round")
+    # Personalized greeting on the select-round page
+    first = (ss.get("candidate_first") or "").strip() or "there"
+    st.markdown(f"### 👋 Hi {first}, choose your interview round")
+    st.caption("We’ll address you by name throughout the interview.")
     if not ss.interview_agent:
         st.error("Interview agent not initialized. Please upload the resume first.")
         ss.stage = "upload"
@@ -543,14 +561,45 @@ if ss.stage == "interviewing":
 
     # --- Record via browser mic ---
     st.markdown("#### Your answer (record via browser mic)")
-    rec = mic_recorder(
-        start_prompt="🎙️ Start recording",
-        stop_prompt="⏹️ Stop",
-        key=f"mic_{qid}",
-        just_once=False,
-        use_container_width=True,
-        format="wav",   # ensure WAV bytes from the component
-    )
+    st.markdown("#### Your answer (record via browser mic)")
+    audio_bytes = None
+
+    if HAVE_MIC_RECORDER:
+        rec = mic_recorder(
+            start_prompt="🎙️ Start recording",
+            stop_prompt="⏹️ Stop",
+            just_once=False,
+            use_container_width=True,
+            key=f"mic_{qid}",
+            # NOTE: no 'format' kwarg in this component version
+        )
+        if isinstance(rec, dict) and rec.get("bytes"):
+            audio_bytes = rec["bytes"]
+
+    elif HAVE_AUDIO_RECORDER:
+        # Fallback widget
+        audio_bytes = audio_recorder(
+            text="Click to record / click again to stop",
+            sample_rate=16_000
+        )
+
+    else:
+        st.warning("No mic widget available. You can upload audio instead.")
+        up = st.file_uploader("Upload an audio file (wav/mp3/m4a)", type=["wav", "mp3", "m4a"], key=f"upload_{qid}")
+        if up:
+            audio_bytes = up.read()
+
+    # Preview + transcribe
+    if audio_bytes:
+        st.audio(io.BytesIO(audio_bytes))
+        if qid not in ss.rec_transcript:
+            with st.spinner("Transcribing..."):
+                ss.rec_transcript[qid] = transcribe_audio_bytes(audio_bytes) or ""
+
+    if ss.rec_transcript.get(qid):
+        st.markdown("**Transcript:**")
+        st.write(ss.rec_transcript[qid])
+
 
     if rec and rec.get("bytes"):
         ss.rec_audio[qid] = rec["bytes"]
