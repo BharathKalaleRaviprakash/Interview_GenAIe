@@ -3,10 +3,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+# utils/config.py
+import os, streamlit as st
+def _get(name, default=None):
+    v = st.secrets.get(name, os.getenv(name, default))
+    return v.strip() if isinstance(v, str) else v
+ELEVENLABS_API_KEY = _get("ELEVENLABS_API_KEY")
+ELEVENLABS_VOICE_ID = _get("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")  # Rachel
+OPENAI_API_KEY     = _get("OPENAI_API_KEY")
 
-ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
 
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY not in env file")

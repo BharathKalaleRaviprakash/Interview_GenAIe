@@ -28,7 +28,6 @@ except Exception:
 from utils.config import ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, OPENAI_API_KEY
 
 # Known safe public voice ID for "Rachel" (from ElevenLabs docs)
-DEFAULT_RACHEL_ID = "21m00Tcm4TlvDq8ikWAM"
 
 def _resolve_voice_id(v: str | None) -> str:
     """
@@ -44,30 +43,60 @@ def _resolve_voice_id(v: str | None) -> str:
     if len(v.strip()) < 10:
         return DEFAULT_RACHEL_ID
     return v.strip()
+# core/audio_io.py
+from __future__ import annotations
+import io, tempfile
+import streamlit as st
+from utils.config import ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, OPENAI_API_KEY
+
+DEFAULT_RACHEL_ID = "21m00Tcm4TlvDq8ikWAM"
+
+def _voice(v: str | None) -> str:
+    if not v or len(v.strip()) < 10:
+        return DEFAULT_RACHEL_ID
+    return v.strip()
 
 def speak_text_bytes(text: str) -> bytes | None:
-    if not text or not ELEVENLABS_API_KEY:
+    if not text:
         return None
-    try:
-        from elevenlabs.client import ElevenLabs
-        client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
 
-        voice_id = _resolve_voice_id(ELEVENLABS_VOICE_ID)
+    # ---- Try ElevenLabs first ----
+    if ELEVENLABS_API_KEY:
+        try:
+            from elevenlabs.client import ElevenLabs
+            client = ElevenLabs(api_key=ELEVENLABS_API_KEY.strip())
+            stream = client.text_to_speech.convert(
+                voice_id=_voice(ELEVENLABS_VOICE_ID),
+                optimize_streaming_latency="0",
+                output_format="mp3_44100_128",
+                text=text,
+            )
+            buf = io.BytesIO()
+            for chunk in stream:
+                if chunk:
+                    buf.write(chunk)
+            return buf.getvalue()
+        except Exception as e:
+            st.warning(f"TTS (ElevenLabs) error: {e}")
 
-        stream = client.text_to_speech.convert(
-            voice_id=voice_id,
-            optimize_streaming_latency="0",
-            output_format="mp3_44100_128",
-            text=text,
-        )
-        buf = io.BytesIO()
-        for chunk in stream:
-            if chunk:
-                buf.write(chunk)
-        return buf.getvalue()
-    except Exception as e:
-        st.warning(f"TTS error: {e}")
-        return None
+    # ---- Fallback: OpenAI TTS ----
+    if OPENAI_API_KEY:
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=OPENAI_API_KEY)
+            # Use text-to-speech (model names may vary; tts-1 is common)
+            speech = client.audio.speech.create(
+                model="tts-1",
+                voice="alloy",
+                input=text,
+                format="mp3"
+            )
+            return speech.read()  # bytes
+        except Exception as e:
+            st.warning(f"TTS (OpenAI) error: {e}")
+
+    # No TTS available
+    return None
 
 # ============================ STT ============================
 
