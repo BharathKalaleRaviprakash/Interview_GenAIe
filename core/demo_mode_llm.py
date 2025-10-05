@@ -38,7 +38,6 @@ def _extract_json_any(text: str) -> Optional[str]:
     return None
 
 def _parse_json_loose(blob: str) -> dict:
-    # try direct
     return json.loads(blob)
 
 def _validate_payload(data: dict) -> List[Dict[str, str]]:
@@ -53,8 +52,15 @@ def generate_llm_demo_qa(
     num_questions: int = 8,
     model: Optional[str] = None,
     temperature: float = 0.35,
+    candidate_name: Optional[str] = None,   # <-- NEW
 ) -> List[Dict[str, str]]:
     num_questions = max(1, min(20, int(num_questions)))
+
+    # Optional personalization
+    name_instr = ""
+    if candidate_name:
+        first = candidate_name.split()[0].title()
+        name_instr = f'Address the candidate by first name "{first}" when appropriate.'
 
     user_prompt = f"""
 Read the résumé and produce interview Q&A grounded ONLY in it.
@@ -66,6 +72,8 @@ Read the résumé and produce interview Q&A grounded ONLY in it.
 ROLE: {role}
 ROUND: {round_name}   # behavioral | swe | ds-ml | system-design | auto
 NUM_QUESTIONS: {num_questions}
+
+{name_instr}
 
 Rules:
 - Generate exactly NUM_QUESTIONS items.
@@ -84,17 +92,15 @@ Return ONLY valid JSON matching this schema (no markdown fences, no extra text):
 }}
 """
 
-    # ---- First attempt ----
-        # ---- First attempt (JSON mode on) ----
+    # ---- First attempt (force JSON via Chat Completions) ----
     raw = generate_completion(
         prompt=user_prompt,
         system=SYSTEM_PROMPT,
         model=model or "gpt-4o-mini",
         temperature=temperature,
         stream=False,
-        response_format={"type": "json_object"},   # <<— force JSON-only output
+        response_format={"type": "json_object"},  # JSON-only output
     )
-
     if not isinstance(raw, str):
         raw = "".join(list(raw))
 
@@ -106,12 +112,12 @@ Return ONLY valid JSON matching this schema (no markdown fences, no extra text):
         except Exception:
             pass  # fall through to repair
 
-    # ---- Repair attempt: ask the model to rewrite EXACTLY JSON ----
+    # ---- Repair attempt: ask for JSON-only rewrite ----
     repair_prompt = f"""
 Rewrite the following content as valid JSON ONLY (no prose, no fences), conforming to the schema.
 If it is not JSON, synthesize valid JSON that matches the intent.
 
-SCHEMA (example keys only):
+SCHEMA:
 {{
   "role": "{role}",
   "round": "{round_name}",
@@ -130,9 +136,8 @@ CONTENT TO FIX:
         model=model or "gpt-4o-mini",
         temperature=0.0,
         stream=False,
-        response_format={"type": "json_object"},   # <<— force JSON
+        response_format={"type": "json_object"},  # JSON-only output
     )
-
     if not isinstance(repaired, str):
         repaired = "".join(list(repaired))
 

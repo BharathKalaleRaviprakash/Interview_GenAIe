@@ -476,10 +476,11 @@ if ss.stage == "select_round":
                             role="Software Engineer / Data Scientist",
                             round_name=round_name,
                             num_questions=8,
-                            model="gpt-4o-mini",              # <<< hard-pin a valid model here
-                            temperature=0.2,
-                            candidate_name=ss.get("candidate_name") or None,
+                            model="gpt-4o-mini",
+                            temperature=0.35,
+                            candidate_name=ss.get("candidate_name") or None,  # now accepted
                         )
+
 
                     except Exception as e:
                         st.error(f"LLM generation failed: {e}")
@@ -560,8 +561,6 @@ if ss.stage == "interviewing":
         st.info("TTS not available (check API key/voice).")
 
     # --- Record via browser mic ---
-    st.markdown("#### Your answer (record via browser mic)")
-    st.markdown("#### Your answer (record via browser mic)")
     audio_bytes = None
 
     if HAVE_MIC_RECORDER:
