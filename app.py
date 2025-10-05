@@ -399,9 +399,11 @@ if ss.stage == "select_round":
                             role="Software Engineer / Data Scientist",
                             round_name=round_name,
                             num_questions=8,
-                            model=os.getenv("OPENAI_MODEL") or None,
-                            temperature=0.35,
+                            model="gpt-4o-mini",              # <<< hard-pin a valid model here
+                            temperature=0.2,
+                            candidate_name=ss.get("candidate_name") or None,
                         )
+
                     except Exception as e:
                         st.error(f"LLM generation failed: {e}")
                         qa_items = []
