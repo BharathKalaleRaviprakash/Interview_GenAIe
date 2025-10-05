@@ -55,21 +55,23 @@ def speak_text_bytes(text: str) -> bytes | None:
             st.warning(f"TTS (ElevenLabs) error: {e}")
 
     # Fallback: OpenAI TTS
+    # ---- Fallback: OpenAI TTS ----
     if OPENAI_API_KEY:
         try:
             from openai import OpenAI
             client = OpenAI(api_key=str(OPENAI_API_KEY).strip())
-            speech = client.audio.speech.create(
-                model="tts-1",
+            resp = client.audio.speech.create(
+                model="gpt-4o-mini-tts",   # or "gpt-4o-tts" if you have access
                 voice="alloy",
                 input=text,
-                format="mp3",
+                response_format="mp3",    # <-- was 'format', must be 'response_format'
             )
-            return speech.read()  # bytes
+            return resp.read()  # bytes
         except Exception as e:
             st.warning(f"TTS (OpenAI) error: {e}")
 
-    return None
+
+        return None
 
 # Back-compat alias (some modules may still call speak_text)
 def speak_text(text: str) -> bytes | None:
