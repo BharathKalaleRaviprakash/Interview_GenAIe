@@ -51,19 +51,90 @@ st.set_page_config(page_title="Interview GenAIe", layout="wide")
 st.title("Interview GenAIe")
 st.markdown("Upload your resume, choose **an** interview round, and practice with an AI interviewer!")
 
-st.sidebar.header("About")
-st.sidebar.info(
-    "This app uses AI (OpenAI & ElevenLabs) to conduct a mock interview based on your resume. "
-    "Upload your resume, select a round, answer questions by voice, and receive feedback/scores."
+# Quick state
+first = (st.session_state.get("candidate_first") or "there").split()[0].title()
+stage_map = {"upload": "Upload", "select_round": "Select round",
+             "interviewing": "Interview", "feedback": "Feedback"}
+stage_label = stage_map.get(st.session_state.get("stage"), "—")
+round_label = AVAILABLE_ROUNDS.get(st.session_state.get("selected_round_key"), {}).get("name", "—")
+duration_min = st.session_state.get("interview_duration_min", 10)
+
+# Time left (shows during interview)
+left_secs = 0
+if st.session_state.get("interview_end_ts"):
+    left_secs = max(0, int(st.session_state["interview_end_ts"] - time.time()))
+def _mmss(n): 
+    m, s = divmod(max(0, int(n)), 60)
+    return f"{m:02d}:{s:02d}"
+
+# Key presence (don’t re-call the APIs here to keep sidebar snappy)
+openai_present = bool(config.OPENAI_API_KEY)
+el_present = bool(config.ELEVENLABS_API_KEY)
+
+# Sidebar CSS
+st.sidebar.markdown(
+    """
+    <style>
+      [data-testid="stSidebar"]{
+        background: linear-gradient(180deg,#0f172a 0%, #111827 100%);
+        color:#e5e7eb; padding: 6px 10px 14px 10px;
+      }
+      [data-testid="stSidebar"] *{ color:#e5e7eb; }
+      .sb-card{ background: rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08);
+                border-radius:14px; padding:12px 14px; margin:10px 0 12px 0; }
+      .toprow{ display:flex; gap:.75rem; align-items:center; margin-bottom:.35rem; }
+      .avatar{ width:42px; height:42px; border-radius:50%; background:#0ea5e9;
+               display:flex; align-items:center; justify-content:center; font-weight:700; }
+      .title{ font-weight:700; line-height:1.05; }
+      .muted{ opacity:.8; font-size:.85rem; }
+      .kv{ display:flex; justify-content:space-between; gap:8px; font-size:.92rem; margin:.18rem 0; }
+      .pill{ padding:.12rem .55rem; border-radius:999px; font-size:.8rem;
+             background: rgba(59,130,246,.15); color:#93c5fd; border:1px solid rgba(59,130,246,.35); }
+      .badge{ display:inline-flex; align-items:center; gap:.35rem; font-weight:600;
+              padding:.22rem .55rem; border-radius:999px; font-size:.82rem; border:1px solid;}
+      .ok{ background:rgba(16,185,129,.14); color:#34d399; border-color:rgba(16,185,129,.35); }
+      .err{ background:rgba(239,68,68,.18); color:#f87171; border-color:rgba(239,68,68,.35); }
+      .hr{ height:1px; margin:.6rem 0; background: linear-gradient(90deg,transparent,rgba(255,255,255,0.18),transparent); }
+      .cta a{ color:#93c5fd; text-decoration:none; } .cta a:hover{ text-decoration:underline; }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
-from utils import config
-import streamlit as st
 
-st.sidebar.subheader("Auth Diagnostics")
+st.sidebar.markdown(
+    f"""
+    <div class="sb-card">
+      <div class="toprow">
+        <div class="avatar">AI</div>
+        <div>
+          <div class="title">Interview GenAIe</div>
+          <div class="muted">Mock interviews, real feedback</div>
+        </div>
+      </div>
+      <div class="kv"><span>Candidate</span><span class="pill">{first}</span></div>
+      <div class="kv"><span>Stage</span><span class="pill">{stage_label}</span></div>
+      <div class="kv"><span>Round</span><span class="pill">{round_label}</span></div>
+      <div class="kv"><span>Duration</span><span class="pill">{duration_min} min</span></div>
+      {"<div class='kv'><span>Time left</span><span class='pill'>" + _mmss(left_secs) + "</span></div>" if stage_label=='Interview' else ""}
+    </div>
 
-st.sidebar.caption(f"OpenAI key present: {bool(config.OPENAI_API_KEY)} (…{(config.OPENAI_API_KEY or '')[-4:]})")
-st.sidebar.caption(f"ElevenLabs key present: {bool(config.ELEVENLABS_API_KEY)} (…{(config.ELEVENLABS_API_KEY or '')[-4:]})")
+    <div class="sb-card">
+      <div style="font-weight:600">Auth</div>
+      <div style="display:flex; gap:.4rem; flex-wrap:wrap; margin-top:.4rem;">
+        <span class="badge {('ok' if openai_present else 'err')}">🔑 OpenAI {('OK' if openai_present else 'Missing')}</span>
+        <span class="badge {('ok' if el_present else 'err')}">🎙 ElevenLabs {('OK' if el_present else 'Missing')}</span>
+      </div>
+      <div class="hr"></div>
+      <div class="muted">Keys are loaded from Streamlit <em>Secrets</em>.</div>
+    </div>
 
+    <div class="sb-card cta">
+      <div class="kv"><span>Help</span><span>📧 <a href="mailto:support@example.com">Contact</a></span></div>
+      <div class="kv"><span>Source</span><span>🌐 <a href="https://github.com/your/repo" target="_blank">GitHub</a></span></div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 try:
     if config.OPENAI_API_KEY:
         from openai import OpenAI
@@ -588,7 +659,6 @@ if ss.stage == "interviewing":
         if up:
             audio_bytes = up.read()
 
-    # Preview + transcribe
     if audio_bytes:
         st.audio(io.BytesIO(audio_bytes))
         if qid not in ss.rec_transcript:
@@ -598,20 +668,6 @@ if ss.stage == "interviewing":
     if ss.rec_transcript.get(qid):
         st.markdown("**Transcript:**")
         st.write(ss.rec_transcript[qid])
-
-
-    if rec and rec.get("bytes"):
-        ss.rec_audio[qid] = rec["bytes"]
-        st.audio(io.BytesIO(rec["bytes"]), format="audio/wav")
-
-        # Transcribe once per capture
-        if qid not in ss.rec_transcript:
-            with st.spinner("Transcribing..."):
-                ss.rec_transcript[qid] = transcribe_audio_bytes(rec["bytes"]) or ""
-
-        if ss.rec_transcript.get(qid):
-            st.markdown("**Transcript:**")
-            st.write(ss.rec_transcript[qid])
 
     # --- Actions ---
     cols = st.columns([1, 1, 6])
