@@ -293,9 +293,6 @@ if ss.stage == "upload":
                             "cover_signals": info.get("cover_signals"),
                             "jd_signals": info.get("jd_signals"),
                         })
-                    cleanup_temp_file(ss.temp_resume_path)
-                    ss.temp_resume_path = None
-                    ss.resume_text = None
                     st.stop()  # stay on the upload page
 
                 # Passed strict validation — proceed
