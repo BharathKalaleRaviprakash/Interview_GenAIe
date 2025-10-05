@@ -38,6 +38,29 @@ st.sidebar.info(
     "This app uses AI (OpenAI & ElevenLabs) to conduct a mock interview based on your resume. "
     "Upload your resume, select a round, answer questions by voice, and receive feedback/scores."
 )
+from utils import config
+import streamlit as st
+
+st.sidebar.subheader("Auth Diagnostics")
+
+st.sidebar.caption(f"OpenAI key present: {bool(config.OPENAI_API_KEY)} (…{(config.OPENAI_API_KEY or '')[-4:]})")
+st.sidebar.caption(f"ElevenLabs key present: {bool(config.ELEVENLABS_API_KEY)} (…{(config.ELEVENLABS_API_KEY or '')[-4:]})")
+
+try:
+    if config.OPENAI_API_KEY:
+        from openai import OpenAI
+        OpenAI(api_key=config.OPENAI_API_KEY).models.list()
+        st.sidebar.success("✅ OpenAI auth OK")
+except Exception as e:
+    st.sidebar.error(f"❌ OpenAI auth failed: {e}")
+
+try:
+    if config.ELEVENLABS_API_KEY:
+        from elevenlabs.client import ElevenLabs
+        ElevenLabs(api_key=config.ELEVENLABS_API_KEY).voices.get_all()
+        st.sidebar.success("✅ ElevenLabs auth OK")
+except Exception as e:
+    st.sidebar.error(f"❌ ElevenLabs auth failed: {e}")
 
 # ---------- Keys / Feature flags ----------
 missing = []
