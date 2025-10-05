@@ -5,7 +5,14 @@ numpy>=1.24
 requests>=2.32.0
 
 # --- Streamlit app ---
+# Core
 streamlit==1.38.0
+
+# Preferred mic widget (if it builds for you)
+streamlit-mic-recorder==0.0.4
+
+# Fallback mic widget
+audio-recorder-streamlit>=0.0.8
 watchdog>=4.0.1
 
 # --- OpenAI + ElevenLabs (optional AI APIs) ---
