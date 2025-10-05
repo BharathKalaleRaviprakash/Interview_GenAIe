@@ -2,376 +2,544 @@ import streamlit as st
 import os
 import time
 import traceback
-
-from core.resume_parser import parse_resume
-from agent.round_manger import AVAILABLE_ROUNDS
-from agent.interview_agent import InterviewAgent
-from core.audio_io import speak_text, transcribe_audio
-
-from core.feedback_generator import generate_feedback_and_scores
-from utils.config import TEMP_AUDIO_FILENAME
-from utils import config
+import hashlib
+import uuid
 from pathlib import Path
 
+# --- Core / Agents ---
+from core.resume_parser import parse_resume
+from agent.round_manger import AVAILABLE_ROUNDS   # <-- fix: was round_manger
+from agent.interview_agent import InterviewAgent
+from utils.config import TEMP_AUDIO_FILENAME
 
+
+# --- Audio I/O ---
+from core.audio_io import speak_text, record_audio, transcribe_audio
+
+# --- Feedback ---
+from core.feedback_generator import generate_feedback_and_scores
+
+# --- Config ---
+from utils import config
+
+
+# Prefer the single constant your audio layer actually uses
+TEMP_AUDIO_FILE = TEMP_AUDIO_FILENAME
+
+# core/audio_io.py  (add near your other imports)
+import queue
+import wave
+import threading
+import time
+import sounddevice as sd
+
+# Globals for async recording
+_record_q = None
+_record_stream = None
+_record_thread = None
+_record_wf = None
+_record_lock = threading.Lock()
+_record_running = False
+
+def start_recording(filename: str, samplerate: int = 16000, channels: int = 1) -> str:
+    """
+    Non-blocking recording to a WAV file. Call stop_recording() to finish.
+    Returns the path where audio will be written.
+    """
+    global _record_q, _record_stream, _record_thread, _record_wf, _record_running
+
+    with _record_lock:
+        if _record_running:
+            raise RuntimeError("A recording is already in progress. Stop it first.")
+
+        _record_q = queue.Queue()
+        _record_wf = wave.open(filename, "wb")
+        _record_wf.setnchannels(channels)
+        _record_wf.setsampwidth(2)  # 16-bit PCM
+        _record_wf.setframerate(samplerate)
+
+        def _callback(indata, frames, time_info, status):
+            if status:
+                # You can log/print status if needed
+                pass
+            _record_q.put(indata.copy())
+
+        _record_stream = sd.InputStream(
+            samplerate=samplerate,
+            channels=channels,
+            dtype="int16",
+            callback=_callback,
+        )
+
+        def _writer():
+            # Flush audio from queue into the WAV until stopped
+            while _record_running:
+                try:
+                    chunk = _record_q.get(timeout=0.1)
+                    _record_wf.writeframes(chunk.tobytes())
+                except queue.Empty:
+                    continue
+
+        _record_stream.start()
+        _record_running = True
+        _record_thread = threading.Thread(target=_writer, daemon=True)
+        _record_thread.start()
+
+        return filename
+def stop_recording() -> str | None:
+    """
+    Stops the active recording if any, and closes the WAV file.
+    Returns path to the recorded file or None if nothing was recorded.
+    """
+    global _record_q, _record_stream, _record_thread, _record_wf, _record_running
+
+    with _record_lock:
+        if not _record_running:
+            return None
+        _record_running = False
+
+    # Ensure stream and writer thread finish
+    try:
+        if _record_stream:
+            _record_stream.stop()
+            _record_stream.close()
+    except Exception:
+        pass
+    finally:
+        _record_stream = None
+
+    if _record_thread:
+        _record_thread.join(timeout=2.0)
+        _record_thread = None
+
+    path = None
+    if _record_wf:
+        try:
+            path = _record_wf._file.name if hasattr(_record_wf, "_file") else None
+        except Exception:
+            path = None
+        try:
+            _record_wf.close()
+        except Exception:
+            pass
+        _record_wf = None
+
+    _record_q = None
+
+    # 🔹 Important: small delay for Windows to release handle
+    time.sleep(0.2)
+
+    return path
+
+
+# ---------- Page ----------
 st.set_page_config(page_title="AceBot Interviewer", layout="wide")
+st.title("AceBot Interviewer")
+st.markdown("Upload your resume, choose **an** interview round, and practice with an AI interviewer!")
 
-UPLOAD_DIR = "data/uploads"
+st.sidebar.header("About")
+st.sidebar.info(
+    "This app uses AI (OpenAI & ElevenLabs) to conduct a mock interview based on your resume. "
+    "Upload your resume, select a round, answer questions by voice, and receive feedback/scores."
+)
 
-import hashlib
-from core.resume_parser import parse_resume  # you already import this
-
+# ---------- Helpers ----------
 @st.cache_data(show_spinner=False)
 def _parse_resume_cached(path: str, file_hash: str) -> str | None:
-    # cache key = (path, file_hash). If file changes, hash changes => re-run.
     return parse_resume(path)
 
 def _hash_file(path: str) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):  # 1MB chunks
+        for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
 
+UPLOAD_DIR = Path("data/uploads")
 
 def save_uploaded_file(uploaded_file) -> str | None:
-    """Save a Streamlit UploadedFile to disk and return the path."""
+    """Save a Streamlit UploadedFile to disk (with basic safety) and return the path."""
     if not uploaded_file:
         return None
     try:
-        # ensure dir exists
-        Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
+        # Size guard (e.g., 10 MB)
+        max_mb = 10
+        if uploaded_file.size and uploaded_file.size > max_mb * 1024 * 1024:
+            st.error(f"File too large (> {max_mb} MB).")
+            return None
 
-        # use the *name* (string), not the object; basic sanitization via Path.name
-        filename = Path(uploaded_file.name).name
-        dest = Path(UPLOAD_DIR) / filename
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-        # avoid overwriting: add a counter if file exists
-        if dest.exists():
-            stem, suf = dest.stem, dest.suffix
-            i = 1
-            while dest.exists():
-                dest = Path(UPLOAD_DIR) / f"{stem}_{i}{suf}"
-                i += 1
+        # Derive a safe name and avoid collisions
+        orig_name = Path(uploaded_file.name).name
+        safe_stem = Path(orig_name).stem[:64] or "resume"
+        ext = Path(orig_name).suffix.lower()
+        if ext not in {".pdf", ".docx"}:
+            st.error("Unsupported file type. Please upload a PDF or DOCX.")
+            return None
 
-        # write bytes
-        uploaded_file.seek(0)  # reset pointer if it was read earlier
+        dest = UPLOAD_DIR / f"{safe_stem}-{uuid.uuid4().hex[:8]}{ext}"
+        uploaded_file.seek(0)
         with open(dest, "wb") as f:
-            f.write(uploaded_file.getbuffer())  # or uploaded_file.read()
-
+            f.write(uploaded_file.getbuffer())
         return str(dest)
     except Exception as e:
-        st.error(f"Error in saving uploaded file: {e}")
+        st.error(f"Error saving uploaded file: {e}")
         return None
 
 def cleanup_temp_file(file_path):
-    """Removes a specific temporary file"""
-    try: 
+    try:
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
     except Exception as e:
         st.warning(f"Could not remove temporary file {file_path}: {e}")
 
-if 'stage' not in st.session_state:
-    st.session_state.stage = 'upload'
-if 'resume_text' not in st.session_state:
-    st.session_state.resume_text = None
-if 'interview_agent' not in st.session_state:
-    st.session_state.interview_agent = None
-if 'selected_round_key' not in st.session_state:
-    st.session_state.selected_round_key = None
-if 'questions' not in st.session_state:
-    st.session_state.questions = None
-if 'current_question_index' not in st.session_state:
-    st.session_state.current_question_index = 0
-if 'interview_history' not in st.session_state:
-    st.session_state.interview_history = []  # List of {'question': q, 'answer': a}
-if 'feedback' not in st.session_state:
-    st.session_state.feedback = None
-if 'temp_resume_path' not in st.session_state:
-    st.session_state.temp_resume_path = None   #Store path for cleanup 
+# ---------- Session ----------
+ss = st.session_state
+ss.setdefault("stage", "upload")
+ss.setdefault("resume_text", None)
+ss.setdefault("interview_agent", None)
+ss.setdefault("selected_round_key", None)
+ss.setdefault("questions", None)
+ss.setdefault("current_question_index", 0)
+ss.setdefault("interview_history", [])
+ss.setdefault("feedback", None)
+ss.setdefault("temp_resume_path", None)
+ss.setdefault("is_recording", False)
+ss.setdefault("recording_path", None)   # current question's wav file (while recording)
 
-keys_loaded = bool(config.OPENAI_API_KEY and config.ELEVENLABS_API_KEY)
-if not keys_loaded:
-    st.error("API keys for OpenAI or ElevenLabs not found. Please check your .env file")
+
+# ---------- Keys / Feature flags ----------
+# Allow the app to run without ElevenLabs (we’ll print text instead of speaking)
+missing = []
+if not getattr(config, "OPENAI_API_KEY", None):
+    missing.append("OpenAI")
+if not getattr(config, "ELEVENLABS_API_KEY", None):
+    st.info("ElevenLabs key not found — voice will fall back to on-screen text.")
+keys_blocking = "OpenAI" in missing
+if keys_blocking:
+    st.error("OpenAI API key not found. Please set it in your .env and reload.")
     st.stop()
 
+# ---------- Stage 1: Upload ----------
+if ss.stage == "upload":
+    st.header("1) Upload Your Resume")
+    uploaded_file = st.file_uploader("Choose a resume (PDF or DOCX)", type=["pdf", "docx"])
 
-st.title("AceBot Interviewer")
-st.markdown("Upload your resume, choose and interview round and practice with an AI interviewer!")
-
-st.sidebar.header("About")
-st.sidebar.info(
-    "This app uses AI (OpenAI & ElevenLabs) to conduct a mock interview based on your resume."
-    "Upload your resume, select a round and answer the questions."
-    "Receive feedback and scores to help you prepare."
-)
-
-# --- Stage 1: Upload Resume---
-if st.session_state.stage == 'upload':
-    st.header("1. Upload Your Resume")
-    uploaded_file = st.file_uploader("Choose a resume file (PDF or DOCX)", type=['pdf', 'docx'])
-
-    if uploaded_file is not None:
-        #Save and parse
-        st.session_state.temp_resume_path = save_uploaded_file(uploaded_file)
-        if st.session_state.temp_resume_path:
-            file_hash = _hash_file(st.session_state.temp_resume_path)
+    if uploaded_file:
+        ss.temp_resume_path = save_uploaded_file(uploaded_file)
+        if ss.temp_resume_path:
+            file_hash = _hash_file(ss.temp_resume_path)
             with st.spinner("Parsing resume..."):
-                st.session_state.resume_text = _parse_resume_cached(
-                    st.session_state.temp_resume_path, file_hash
-                )
-        
-            if st.session_state.resume_text: 
-                st.success("Resume parsed successfully!")
+                ss.resume_text = _parse_resume_cached(ss.temp_resume_path, file_hash)
 
+            if ss.resume_text:
+                st.success("Resume parsed successfully!")
                 try:
-                    st.session_state.interview_agent  = InterviewAgent(st.session_state.resume_text)
-                    st.session_state.stage = 'select_round'
-                    st.rerun()  #  Rerun to move to the next staeg UI immediately
-                
+                    ss.interview_agent = InterviewAgent(ss.resume_text)
+                    ss.stage = "select_round"
+                    st.rerun()  # move to next stage immediately
                 except Exception as e:
                     st.error(f"Failed to initialize interview agent: {e}")
-                    st.session_state.resume_text = None # Reset on failure
-                    st.session_state.interview_agent = None
-                    cleanup_temp_file(st.session_state.temp_resume_path) #cleanup failed attempt's file
-
+                    ss.resume_text = None
+                    ss.interview_agent = None
+                    cleanup_temp_file(ss.temp_resume_path)
+                    ss.temp_resume_path = None
             else:
-                st.error("Could not extract text from the resume. Please try a different file")
-                cleanup_temp_file(st.session_state.temp_resume_path)
-                # clean up failed attempt's file
-                st.session_state.temp_resume_path = None
+                st.error("Could not extract text from the resume. Try a different file.")
+                cleanup_temp_file(ss.temp_resume_path)
+                ss.temp_resume_path = None
 
+# ---------- Stage 2: Select Round ----------
+if ss.stage == "select_round":
+    st.header("2) Select Interview Round")
 
-# ---Stage 2: Select Round---
-if st.session_state.stage == 'select_round':
-    st.header("2. Select Interview Round")
-
-    if not st.session_state.interview_agent:
+    if not ss.interview_agent:
         st.error("Interview agent not initialized. Please upload the resume first.")
-        st.session_state.stage = 'upload' # Go back to upload stage
-        # Clean up just in case
-        cleanup_temp_file(st.session_state.temp_resume_path)
-        st.session_state.temp_resume_path = None
+        ss.stage = "upload"
+        cleanup_temp_file(ss.temp_resume_path)
+        ss.temp_resume_path = None
         st.rerun()
 
-    round_options = {key: info['name'] for key, info in AVAILABLE_ROUNDS.items()}  
-    st.session_state.selected_round_key = st.selectbox(
+    round_options = {key: info["name"] for key, info in AVAILABLE_ROUNDS.items()}
+    ss.selected_round_key = st.selectbox(
         "Choose the type of interview round:",
         options=list(round_options.keys()),
-        format_func=lambda key: round_options[key]  # show names in dropdown
+        format_func=lambda key: round_options[key],
     )
+
     if st.button("Start Interview Round", key="start_interview"):
-        if st.session_state.selected_round_key:
-            selected_round_info = AVAILABLE_ROUNDS[st.session_state.selected_round_key]
-            st.session_state.current_question_index = 0
-            st.session_state.interview_history = []
-            st.session_state.feedback = None
+        if ss.selected_round_key:
+            info = AVAILABLE_ROUNDS[ss.selected_round_key]
+            ss.current_question_index = 0
+            ss.interview_history = []
+            ss.feedback = None
 
-            # Generate questions for the round 
-            agent = st.session_state.interview_agent
-            if agent:
-                with st.spinner(f"Generating questions for the {selected_round_info['name']} round..."):
-                    try:
-                        # access internal method carefully (or refactor agent for this)
-                        st.session_state.questions = agent._generate_questions(
-                            selected_round_info['name'],
-                            selected_round_info['num_questions']
-                        )
-                    except Exception as e:
-                        st.error(f"Error generating questions: {e}")
-                        st.error(traceback.format_exc())  #Print detailed error
-                        st.session_state.questions = []  # Ensure its empty on failure
+            agent = ss.interview_agent
+            with st.spinner(f"Generating questions for the {info['name']} round..."):
+                try:
+                    # Prefer a public method; fall back if needed.
+                    if hasattr(agent, "generate_questions"):
+                        ss.questions = agent.generate_questions(info["name"], info["num_questions"])
+                    else:
+                        ss.questions = agent._generate_questions(info["name"], info["num_questions"])  # noqa
+                except Exception as e:
+                    st.error(f"Error generating questions: {e}")
+                    st.error(traceback.format_exc())
+                    ss.questions = []
 
-                    
-                if st.session_state.questions:
-                    st.session_state.stage = 'interviewing'
-                    st.success(f"Questions generated. Starting  the {selected_round_info['name']} round!")
-                    time.sleep(1)  #Give user a moment to read the message
-                    # Speak welcome message for the round
-                    try:
-                        speak_text(f"Welcome to the {selected_round_info['name']} round. I will ask you {len(st.session_state.questions)} questions. Let's begin with the first question.")
-                    except Exception as e:
-                        st.warning(f"Could not play welcome audio: {e}.Starting interview.")
-                    st.rerun()
-                else:
-                    st.error("Failed to generate questions for the round. Please try selecting the round again or check the logs/API keys.")
-            else:
-                st.error("Interview agent not found. Please restart the process by uploading the resume again.")
-                st.session_state.stage = 'upload'
-                cleanup_temp_file(st.session_state.temp_resume_path)
-                st.session_state.temp_resume_path = None
+            if ss.questions:
+                ss.stage = "interviewing"
+                st.success(f"Questions ready. Starting the {info['name']} round!")
+                try:
+                    speak_text(
+                        f"Welcome to the {info['name']} round. I will ask you {len(ss.questions)} questions. Let's begin."
+                    )
+                except Exception as e:
+                    st.warning(f"Could not play welcome audio: {e}.")
                 st.rerun()
+            else:
+                st.error("Failed to generate questions. Please try again.")
         else:
             st.warning("Please select a round first.")
 
+# ---------- Stage 3: Interviewing ----------
+# ---------- Stage 3: Interviewing ----------
+if ss.stage == "interviewing":
+    round_name = AVAILABLE_ROUNDS[ss.selected_round_key]["name"]
+    st.header(f"Interviewing: {round_name}")
 
-# ---Stage 3: Interviewing ---
-if st.session_state.stage == 'interviewing':
-    st.header(f"Interviewing in Progress: {AVAILABLE_ROUNDS[st.session_state.selected_round_key]['name']} Round")
-
-    # Check if questions are loaded
-    if not st.session_state.questions:
-        st.error("No questions loaded for this round. Please go back and select the round again.")
-        if st.button("Go Back to Round Selection"):
-            st.session_state.stage = 'select_round'
+    if not ss.questions:
+        st.error("No questions loaded for this round. Please go back and select again.")
+        if st.button("Go Back"):
+            ss.stage = "select_round"
             st.rerun()
         st.stop()
 
-    # Get current question index
-    q_index = st.session_state.current_question_index
-    if q_index < len(st.session_state.questions):
-        current_question = st.session_state.questions[q_index]
+    q_idx = ss.current_question_index
+    if q_idx < len(ss.questions):
+        question = ss.questions[q_idx]
+        st.subheader(f"Question {q_idx + 1}/{len(ss.questions)}")
+        st.markdown(f"**Interviewer:** {question}")
 
-        st.subheader(f"Question {q_index + 1}/{len(st.session_state.questions)}")
-        st.markdown(f"**Interviewer:** {current_question}")
-
-        # --- Placeholder for Audio Recording ---
-        st.markdown("**Your ANswer (Type Below):**")
-        # Use a unique key for the text_area based on the question index
-        user_answer = st.text_area("Enter your answer here:", key=f"answer_q{q_index}", height=150)
-
-        # Speak the question only once per question display
-        if f"spoken_q{q_index}" not in st.session_state:
+        # Speak only once per question
+        spoken_flag = f"spoken_q{q_idx}"
+        if not ss.get(spoken_flag, False):
             try:
-                # Use a spinner while speaking maybe?
-                # with st.spinner("Intyerviewer is speaking..."): # This might be annoying if long
-                speak_text(current_question)
-                st.session_state[f"spoken_q{q_index}"] = True
+                speak_text(question)
             except Exception as e:
                 st.warning(f"Could not play question audio: {e}")
-                st.session_state[f"spoken_q{q_index}"] = True # Mark as 'spoken' anyway to avoid retry loop
+            ss[spoken_flag] = True
 
-        # --- Submit Answer Button ---
-        if st.button("Submit Answer", key=f"submit_q{q_index}"):
-            if user_answer and user_answer.strip():
-                # Store the answer
-                st.session_state.interview_history.append({
-                    "question": current_question,
-                    "answer": user_answer.strip()
-                })
+        st.markdown("**Record your answer:**")
 
-                # Move to the next question 
-                st.session_state.current_question_index += 1
+        # Build a unique temp filename per question to avoid collisions
+        # (Keep your TEMPAUDIOFILE base but add the question index)
+        q_audio_path = str(Path(TEMP_AUDIO_FILE).with_name(
+            f"{Path(TEMP_AUDIO_FILE).stem}_q{q_idx}{Path(TEMP_AUDIO_FILE).suffix or '.wav'}"
+        ))
 
-                # If there are more questions, speak the next one (or transition)
-                if st.session_state.current_question_index < len(st.session_state.questions):
-                    next_q_index = st.session_state.current_question_index
-                    next_question = st.session_state.questions[next_q_index]
+        c1, c2, c3 = st.columns(3)
+
+        # START
+        with c1:
+            start_disabled = ss.get("is_recording", False)
+            if st.button("▶️ Start Recording", disabled=start_disabled, key=f"start_q{q_idx}"):
+                try:
+                    # If somehow a prev recording was hanging, stop it
+                    if ss.get("is_recording", False):
+                        try:
+                            stop_recording()
+                        except Exception:
+                            pass
+
+                    start_recording(q_audio_path, samplerate=16000, channels=1)
+                    ss.is_recording = True
+                    ss.recording_path = q_audio_path
+                    st.toast("Recording started")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not start recording: {e}")
+
+        # STOP
+        with c2:
+            stop_disabled = not ss.get("is_recording", False)
+            if st.button("⏹ Stop Recording", disabled=stop_disabled, key=f"stop_q{q_idx}"):
+                try:
+                    final_path = stop_recording()  # may return None on failure
+                except Exception as e:
+                    final_path = None
+                    st.error(f"Could not stop recording: {e}")
+
+                ss.is_recording = False
+
+                # Prefer the returned path; else fall back to the known path
+                if final_path and os.path.exists(final_path):
+                    ss[f"audio_path_q{q_idx}"] = final_path
+                elif ss.get("recording_path") and os.path.exists(ss["recording_path"]):
+                    ss[f"audio_path_q{q_idx}"] = ss["recording_path"]
+                else:
+                    ss[f"audio_path_q{q_idx}"] = None
+
+                ss.recording_path = None
+
+                # Auto-transcribe on stop if we have a file
+                if ss.get(f"audio_path_q{q_idx}"):
+                    with st.spinner("Transcribing..."):
+                        try:
+                            txt = transcribe_audio(ss[f"audio_path_q{q_idx}"]) or ""
+                        except Exception as e:
+                            st.warning(f"Transcription error: {e}")
+                            txt = ""
+                        ss[f"transcript_q{q_idx}"] = txt
+                        if not txt:
+                            st.warning("Could not transcribe that recording. You can re-record.")
+                else:
+                    st.warning("No audio captured. Try recording again.")
+                st.rerun()
+
+        # SUBMIT
+        with c3:
+            submit_disabled = ss.get("is_recording", False)
+            if st.button("✅ Submit Answer", disabled=submit_disabled, key=f"submit_q{q_idx}"):
+                answer_text = ss.get(f"transcript_q{q_idx}", "") or "[No response recorded]"
+                ss.interview_history.append({"question": question, "answer": answer_text})
+
+                # Clean last temp audio eagerly
+                cleanup_temp_file(ss.get(f"audio_path_q{q_idx}"))
+                for k in (f"audio_path_q{q_idx}", f"transcript_q{q_idx}"):
+                    if k in ss:
+                        del ss[k]
+
+                ss.current_question_index += 1
+                if ss.current_question_index < len(ss.questions):
                     try:
-                        # Maybe just say "Next question." or similar to keep it shorter
                         speak_text("Okay, thank you. Next question.")
-                        # Let Streamlit rerun handle displaying the next question text
                     except Exception as e:
                         st.warning(f"Audio notification error: {e}")
+                st.rerun()
 
-                st.rerun() # Rerun to display the next question or move to feedback stage
+        # Show current state / controls below
+        if ss.get("is_recording", False):
+            st.info("🎙️ Recording... Click **Stop Recording** when you're done.")
 
-            else:
-                st.warning("Please enter your answer before submitting.")
-    
+        # Playback + transcript (if any)
+        if ss.get(f"audio_path_q{q_idx}"):
+            st.audio(ss[f"audio_path_q{q_idx}"])
+
+        transcript = ss.get(f"transcript_q{q_idx}", "")
+        if transcript:
+            st.markdown("**Transcript (auto-generated):**")
+            st.write(transcript)
+
+        # Re-record button
+        c_rr, _ = st.columns([1, 5])
+        with c_rr:
+            if st.button("↺ Re-record", key=f"rerecord_q{q_idx}"):
+                # If currently recording, stop first to avoid leaks
+                if ss.get("is_recording", False):
+                    try:
+                        stop_recording()
+                    except Exception:
+                        pass
+                    ss.is_recording = False
+
+                # Remove any existing audio/transcript for this question
+                cleanup_temp_file(ss.get(f"audio_path_q{q_idx}"))
+                for k in (f"audio_path_q{q_idx}", f"transcript_q{q_idx}"):
+                    if k in ss:
+                        del ss[k]
+                ss.recording_path = None
+                st.rerun()
+
     else:
-        # All questions answered, move to feedback stage
-        st.success("All questions for this round are completed")
-        st.session_state.stage = 'feedback'
+        # best effort stop if recording
+        if ss.get("is_recording", False):
+            try: stop_recording()
+            except Exception: pass
+            ss.is_recording = False
+            ss.recording_path = None
+        st.success("All questions for this round are completed.")
+        ss.stage = "feedback"
         try:
-            speak_text("Thank you. That concludes the question for this round. I will now prepare your feedback.")
+            speak_text("Thank you. That concludes this round. I will now prepare your feedback.")
         except Exception as e:
             st.warning(f"Audio notification error: {e}")
-        st.rerun() 
-        
+        st.rerun()
 
-# ---Stage 4: Feedback ---
+# ---------- Stage 4: Feedback ----------
+if ss.stage == "feedback":
+    st.header("Interview Complete — Feedback")
+    agent = ss.interview_agent
+    round_name = AVAILABLE_ROUNDS[ss.selected_round_key]["name"]
 
-if st.session_state.stage == 'feedback':
-    st.header("Interview Complete - Feedback")
-    
-    agent = st.session_state.interview_agent
-    round_name = AVAILABLE_ROUNDS[st.session_state.selected_round_key]['name']
-
-    # Generate feedback only if it hasn't been generated yest for this round
-    if not st.session_state.feedback and agent and st.session_state.interview_history:
-        with st.spinner("Generating feedback... This may take a moment"):
+    if not ss.feedback and agent and ss.interview_history:
+        with st.spinner("Generating feedback..."):
             try:
-                # Generate feedback using the agents's method (or directly call the function)
-                # We need resume_text, round_name, and history from session_state
-                # Inside the 'feedback stage in app.py
-                st.session_state.feedback = generate_feedback_and_scores( 
-                    resume_text = st.session_state.resume_text,
-                    round_name = round_name,
-                    qa_pairs = st.session_state.interview_history
+                ss.feedback = generate_feedback_and_scores(
+                    resume_text=ss.resume_text,
+                    round_name=round_name,
+                    qa_pairs=ss.interview_history,
                 )
-                # Store feedback in agent as well if needed by its internal logic
-                # agent.feedback = st.session_state.feedback # if agent class uses self.feedback
             except Exception as e:
                 st.error(f"Failed to generate feedback: {e}")
-                st.error(traceback.format_exc())  # Print detailed error
+                st.error(traceback.format_exc())
 
-    # Display Feedback if available
-    if st.session_state.feedback:
-        feedback_data = st.session_state.feedback
-
+    if ss.feedback:
+        data = ss.feedback
         st.subheader("Overall Feedback")
-        st.markdown(feedback_data.get("overall_feedback", "N/A"))
+        st.markdown(data.get("overall_feedback", "N/A"))
 
         st.subheader("Suggestions for Improvement")
-        suggestions_val = feedback_data.get("suggestions", "N/A")
-        if isinstance(suggestions_val, list):
-            for s in suggestions_val:
+        suggestions = data.get("suggestions", "N/A")
+        if isinstance(suggestions, list):
+            for s in suggestions:
                 st.markdown(f"- {s}")
         else:
-            st.markdown(suggestions_val)
+            st.markdown(suggestions)
 
         st.subheader("Scores per Question")
-        scores = feedback_data.get("scores_per_question", [])
-        total_score = int(feedback_data.get("total_score", 0))
-        max_score = len(st.session_state.interview_history) * 10
+        scores = data.get("scores_per_question", [])
+        total_score = int(data.get("total_score", 0))
+        max_score = len(ss.interview_history) * 10
 
-        if scores and len(scores) == len(st.session_state.interview_history):
+        if scores and len(scores) == len(ss.interview_history):
             for i, sc in enumerate(scores):
                 st.markdown(f"- **Q{i+1}:** {int(sc)}/10")
         elif scores:
             st.warning(
                 f"Note: Number of scores ({len(scores)}) doesn't match number of questions "
-                f"({len(st.session_state.interview_history)}). Displaying raw scores: {scores}"
+                f"({len(ss.interview_history)}). Displaying raw scores: {scores}"
             )
         else:
             st.markdown("Scores could not be determined.")
 
-
         st.subheader("Total Score for Round")
-        if max_score > 0:
-            st.markdown(f"**{total_score} / {max_score}**")
-        else:
-            st.markdown("N/A (No questions answered)")
+        st.markdown(f"**{total_score} / {max_score or 1}**")
 
-        # Optionally Show raw feedback for debugging
-        with st.expander("Show Raw Feedback Data (for debugging)"):
-            st.json(feedback_data)
-
+        with st.expander("Show Raw Feedback Data (debug)"):
+            st.json(data)
     else:
         st.warning("Feedback is not available for this round.")
-
 
     st.markdown("---")
     if st.button("Start Another Round"):
         # Reset state for a new round, keeping resume and agent
-        st.session_state.stage = 'select_round'
-        st.session_state.selected_round_key = None
-        st.session_state.questions = []
-        st.session_state.current_question_index = 0
-        st.session_state.interview_history = []
-        st.session_state.feedback = None
-        # Clear spoken flags for questions
-        keys_to_clear = [k for k in st.session_state if k.startswith('spoken_q')]
-        for key in keys_to_clear:
-            del st.session_state[key]
+        ss.stage = "select_round"
+        ss.selected_round_key = None
+        ss.questions = []
+        ss.current_question_index = 0
+        ss.interview_history = []
+        ss.feedback = None
+        # Clear spoken flags
+        for k in [k for k in ss.keys() if k.startswith("spoken_q")]:
+            del ss[k]
         st.rerun()
 
-    if st.button("Uploaded New Resume"):
-        #  Reset everything including resume and agent
-        cleanup_temp_file(st.session_state.temp_resume_path) # Cleanup the old resume file
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]  # Clear all session state
-        st.session_state.stage = 'upload' # Go back to start
+    if st.button("Upload New Resume"):
+        # Full reset (also cleans prior resume file)
+        cleanup_temp_file(ss.get("temp_resume_path"))
+        for key in list(ss.keys()):
+            del ss[key]
+        st.session_state.stage = "upload"
         st.rerun()
