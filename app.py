@@ -27,6 +27,8 @@ HAVE_MIC_RECORDER = False
 HAVE_AUDIO_RECORDER = False
 MIC_IMPORT_ERROR = None
 CONTACT_EMAIL = st.secrets.get("CONTACT_EMAIL", "jahnaviashok99@gmail.com")
+from core.db import get_store
+store = get_store()
 
 try:
     from streamlit_mic_recorder import mic_recorder, speech_to_text
@@ -137,7 +139,7 @@ st.sidebar.markdown(
       </div>
       <div class="kv">
         <span>Source</span>
-        <span>🌐 <a href="https://github.com/BharathKalaleRaviprakash/Interview_GenAIe" target="_blank">GitHub</a></span>
+        <span>🌐 <a href="https://github.com/JahnaviAshok/AI_Interview_Assistant" target="_blank">GitHub</a></span>
       </div>
     </div>
     """,
